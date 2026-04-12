@@ -7,10 +7,16 @@
 #define __KERNEL__
 #endif
 
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/poll.h>
 #include <linux/uio.h>
 #include <linux/etherdevice.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <linux/udp.h>
+#include <net/addrconf.h>
+#include <net/ip.h>
 #include <net/sock.h>
 
 #include <ttp.h>
