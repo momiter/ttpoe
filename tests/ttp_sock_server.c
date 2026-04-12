@@ -18,6 +18,7 @@ int main(int argc, char **argv)
     struct iovec iov;
     struct msghdr msg;
     size_t recv_len = sizeof(buffer) - 1;
+    size_t display_len;
     int recv_flags = 0;
     int truncated = 0;
     int family;
@@ -102,13 +103,10 @@ int main(int argc, char **argv)
     }
 
     truncated = !!(msg.msg_flags & MSG_TRUNC);
-    if ((size_t)n < sizeof(buffer)) {
-        buffer[truncated ? recv_len : n] = '\0';
-    } else {
-        buffer[recv_len] = '\0';
-    }
+    display_len = truncated ? recv_len : (size_t)n;
+    buffer[display_len] = '\0';
     printf("received %zd bytes over family %d (copied=%zu trunc=%s): %s\n",
-           n, family, truncated ? recv_len : (size_t)n, truncated ? "yes" : "no",
+           n, family, display_len, truncated ? "yes" : "no",
            buffer);
     close(fd);
     return 0;
