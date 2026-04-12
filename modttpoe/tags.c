@@ -191,6 +191,8 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
 {
     lt->valid       = 0;
     lt->state       = TTP_ST__CLOSED;
+    lt->sock        = NULL;
+    lt->sock_managed = false;
 
     lt->retire_ptr  = 0;
     lt->current_ptr = 0;
@@ -207,6 +209,22 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->try = 0;        /* tx-retry count */
 
     lt->_rkid = 0ULL;   /* clear whole raw key id */
+}
+
+void ttp_tag_force_reset(struct ttp_link_tag *lt)
+{
+    if (!lt) {
+        return;
+    }
+
+    del_timer_sync(&lt->tmr);
+    cancel_work_sync(&lt->wkq);
+
+    while (ttp_noc_dequ(lt)) {
+        ;
+    }
+
+    ttp_tag_reset(lt);
 }
 
 
@@ -244,6 +262,8 @@ int ttp_tag_add (u64 kid)
         if (!lt->valid) { /* found an empty slot */
             lt->valid = 1;
             lt->state = TTP_ST__CLOSED;
+            lt->sock = NULL;
+            lt->sock_managed = false;
 
             lt->_rkid = kid;
             ttp_rbtree_tag_add (lt);
@@ -729,6 +749,8 @@ static int ttp_evt_dequ (void)
 
     ttp_tag_signal_tag (ev);
 
+    ttpoe_socket_fsm_event (ev, rs, ns);
+
     /* call the state entry function for the state we're entering (ns) */
     TTP_DB1 ("##`-> FSM State-Entry: %s\n", TTP_STATE_NAME (ns));
     dqfnp = ttp_fsm_entry_function[ns];
@@ -737,6 +759,7 @@ static int ttp_evt_dequ (void)
             TTP_DBG ("##`-> FSM State-Entry: %s [FAILED]\n", TTP_STATE_NAME (ns));
         }
     }
+
     if (lt) {
         schedule_work (&lt->wkq);
     }
@@ -1134,7 +1157,7 @@ void __init ttp_fsm_init (void)
     }
 }
 
-void __exit ttp_fsm_exit (void)
+void ttp_fsm_exit (void)
 {
     int vi, hv, bk;
     struct ttp_fsm_event *ev;

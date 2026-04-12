@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#ifndef MODTTPOE_TTPOE_H
+#define MODTTPOE_TTPOE_H
 /*
  * Copyright (c) 2023 Tesla Inc. All rights reserved.
  *
@@ -277,4 +279,6 @@ extern int  ttp_skb_dequ (void);
 extern void ttpoe_proc_cleanup (void);
 extern int  __init ttpoe_proc_init (void);
 extern void __exit ttpoe_proc_exit (void);
+#endif
+
 #endif

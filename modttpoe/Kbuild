@@ -17,4 +17,4 @@
 
 obj-m := modttpoe.o
 ccflags-y := -O2 -DTTP_PREFIX=$(TTP_PREFIX_STR) -Werror -I$(PWD)/include
-modttpoe-y := ttpoe.o print.o fsm.o proc.o tags.o param.o noc.o
+modttpoe-y := ttpoe.o print.o fsm.o proc.o tags.o param.o noc.o af_ttp.o socket.o

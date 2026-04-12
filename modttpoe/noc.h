@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#ifndef MODTTPOE_NOC_H
+#define MODTTPOE_NOC_H
+
+#include "fsm.h"
 /*
  * Copyright (c) 2023 Tesla Inc. All rights reserved.
  *
@@ -50,10 +54,17 @@
 
 extern struct ttpoe_host_info ttp_debug_source, ttp_debug_target;
 
+extern int ttpoe_host_resolve_target (u64 *kid, struct ttpoe_host_info *tg);
+extern int ttpoe_submit_event (u8 *buf, struct sk_buff *skb, int nl,
+                               enum ttp_events_enum evnt, struct ttpoe_host_info *tg);
 extern int ttpoe_noc_debug_rx (const u8 *data, u16 nl);
 extern int ttpoe_noc_debug_tx (u8 *buf, struct sk_buff *skb, int nl,
                                enum ttp_events_enum evnt, struct ttpoe_host_info *tg);
 extern int ttpoe_noc_debug_tgt (u64 *kid, struct ttpoe_host_info *tg);
+extern int ttpoe_socket_payload_rx (u64 kid, const u8 *data, u16 nl);
+extern void ttpoe_socket_fsm_event (struct ttp_fsm_event *ev, int rs, int ns);
 
 extern int  __init ttpoe_noc_debug_init (void);
-extern void __exit ttpoe_noc_debug_exit (void);
+extern void ttpoe_noc_debug_exit (void);
+
+#endif

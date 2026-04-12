@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#ifndef MODTTPOE_PRINT_H
+#define MODTTPOE_PRINT_H
 /*
  * Copyright (c) 2023 Tesla Inc. All rights reserved.
  *
@@ -154,3 +156,5 @@ static inline void ttp_print_tag_hdr (struct seq_file *seq)
 
 extern void ttp_print_tag_val (struct seq_file *seq, const struct ttp_link_tag *lt);
 extern void ttp_print_evt_val (struct seq_file *seq, const struct ttp_fsm_event *ev);
+
+#endif

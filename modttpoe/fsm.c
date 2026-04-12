@@ -74,6 +74,7 @@
 #include "fsm.h"
 #include "tags.h"
 #include "noc.h"
+#include "socket.h"
 #include "print.h"
 
 /* 'on_enter' functions: */
@@ -452,6 +453,7 @@ static bool ttp_fsm_rs__CLOSE_XACK (struct ttp_fsm_event *ev)
 TTP_NOINLINE
 static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
 {
+    int rv;
     struct sk_buff *skb;
     struct ttp_link_tag *lt;
     struct ttp_frame_hdr frh;
@@ -490,7 +492,15 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
     if (TTP_ST__OPEN == lt->state ||
         TTP_ST__CLOSE_SENT == lt->state || TTP_ST__CLOSE_RECD == lt->state) {
         if ((lt->rx_seq_id + 1) == pif.txi_seq) {
-            if (ttpoe_noc_debug_rx ((u8 *)frh.noc, pif.noc_len)) {
+            rv = ttpoe_socket_payload_rx (ev->kid, (u8 *)frh.noc, pif.noc_len);
+            if (-ENOTCONN == rv && !lt->sock_managed) {
+                rv = ttpoe_noc_debug_rx ((u8 *)frh.noc, pif.noc_len);
+            }
+            else if (-ENOTCONN == rv) {
+                atomic_inc (&ttp_stats.drp_ct);
+                TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, TTP_OP__TTP_NACK_FULL);
+            }
+            if (rv) {
                 op = TTP_OP__TTP_NACK_FULL;
                 goto send;
             }

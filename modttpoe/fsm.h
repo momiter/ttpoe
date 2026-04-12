@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#ifndef MODTTPOE_FSM_H
+#define MODTTPOE_FSM_H
 /*
  * Copyright (c) 2023 Tesla Inc. All rights reserved.
  *
@@ -258,3 +260,5 @@ extern enum ttp_events_enum ttp_opcodes_to_events_map[];
 #define TTP_OPCODE_IS_VALID(opc)   (((opc)>=TTP_OP__TTP_OPEN) && ((opc)<TTP_OP__invalid))
 
 extern void ttp_fsm_state_function (struct ttp_fsm_event *ev);
+
+#endif

@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#ifndef MODTTPOE_TAGS_H
+#define MODTTPOE_TAGS_H
+
+#include "fsm.h"
+#include "ttpoe.h"
 /*
  * Copyright (c) 2023 Tesla Inc. All rights reserved.
  *
@@ -88,6 +93,8 @@ struct ttp_fsm_event {
     struct sk_buff       *rsk;
     struct sk_buff       *tsk;
 } __attribute__((packed));
+
+struct ttp_sock;
 
 
 struct ttp_link_tag_global {
@@ -200,6 +207,8 @@ struct ttp_link_tag {
     u32 retire_id;
 
     atomic_t opens;
+    struct ttp_sock *sock;
+    bool sock_managed;
 
     union {
         struct {
@@ -306,6 +315,7 @@ extern u64  ttp_tag_key_make (const u8 *mac, u8 vc, bool gw, bool t3);
 
 extern int  ttp_tag_add (u64 kid);
 extern void ttp_tag_reset (struct ttp_link_tag *lt);
+extern void ttp_tag_force_reset (struct ttp_link_tag *lt);
 
 extern void ttp_fsm_evlog_add (const char *fl, const int ln, const char *fn,
                                const int pos, struct ttp_fsm_event *qev,
@@ -326,3 +336,5 @@ extern void ttp_evt_enqu (struct ttp_fsm_event *ev);
 
 extern void ttp_evt_cpqu (struct ttp_fsm_event *ev);
 extern bool ttp_evt_pget (struct ttp_fsm_event **evp);
+
+#endif

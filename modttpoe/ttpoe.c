@@ -84,6 +84,7 @@
 #include "fsm.h"
 #include "tags.h"
 #include "noc.h"
+#include "socket.h"
 #include "print.h"
 
 
@@ -753,6 +754,12 @@ static int __init ttpoe_init (void)
     }
 
     ttp_fsm_init ();
+    if ((rc = ttp_socket_init ())) {
+        ttp_fsm_exit ();
+        ttpoe_noc_debug_exit ();
+        ttpoe_proc_cleanup ();
+        return rc;
+    }
 
     if (!ttp_ipv4_pfxlen) {
         me = ttp_tag_key_make (ttp_etype_dev.dev->dev_addr, 0, false, ttp_ipv4_encap);
@@ -779,6 +786,7 @@ static void __exit ttpoe_exit (void)
 {
     ttp_shutdown = 1;
     dev_remove_pack (&ttp_etype_dev);
+    ttp_socket_exit ();
     ttp_fsm_exit ();
     ttpoe_noc_debug_exit ();
     ttpoe_proc_exit ();

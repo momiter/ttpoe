@@ -53,6 +53,7 @@
 #include <linux/ctype.h>
 #include <linux/version.h>
 #include <linux/cdev.h>
+#include <linux/fs.h>
 #include <linux/skbuff.h>
 #include <linux/etherdevice.h>
 #include <linux/netdevice.h>
@@ -68,6 +69,7 @@
 #include <linux/module.h>
 #include <linux/debugfs.h>
 #include <linux/proc_fs.h>
+#include <linux/uaccess.h>
 #include <net/addrconf.h>
 #include <net/ip.h>
 
@@ -94,7 +96,7 @@ struct ttpoe_host_info ttp_debug_source;
 struct ttpoe_host_info ttp_debug_target;
 
 
-int ttpoe_noc_debug_tgt (u64 *kid, struct ttpoe_host_info *tg)
+int ttpoe_host_resolve_target (u64 *kid, struct ttpoe_host_info *tg)
 {
     u64 tkid;
     u32 node, mask;
@@ -170,7 +172,7 @@ int ttpoe_noc_debug_rx (const u8 *data, u16 nl)
 }
 
 
-int ttpoe_noc_debug_tx (u8 *buf, struct sk_buff *skb, int nl,
+int ttpoe_submit_event (u8 *buf, struct sk_buff *skb, int nl,
                         enum ttp_events_enum evnt, struct ttpoe_host_info *tg)
 {
     int rv;
@@ -190,7 +192,7 @@ int ttpoe_noc_debug_tx (u8 *buf, struct sk_buff *skb, int nl,
         kid = clt._rkid;
         goto force;
     }
-    if ((rv = ttpoe_noc_debug_tgt (&kid, tg))) {
+    if ((rv = ttpoe_host_resolve_target (&kid, tg))) {
         TTP_DBG ("%s: Error: Invalid target.vc: %*phC.%d gw:%d valid:%d\n",
                  __FUNCTION__, ETH_ALEN, tg->mac, tg->vc, tg->gw, tg->ve);
         return rv;
@@ -256,6 +258,18 @@ force:
 }
 
 
+int ttpoe_noc_debug_tgt (u64 *kid, struct ttpoe_host_info *tg)
+{
+    return ttpoe_host_resolve_target (kid, tg);
+}
+
+
+int ttpoe_noc_debug_tx (u8 *buf, struct sk_buff *skb, int nl,
+                        enum ttp_events_enum evnt, struct ttpoe_host_info *tg)
+{
+    return ttpoe_submit_event (buf, skb, nl, evnt, tg);
+}
+
 /*
  * cat /dev/null > noc_debug : Clear noc-debug-rx-page (does not reset ttp link)
  *   echo STRING > noc_debug : Send STRG as payload to peer (open ttp link if needed)
@@ -270,6 +284,9 @@ static ssize_t ttpoe_noc_debug_write (struct file *filp, const char __user *user
     struct sk_buff *skb;
     struct ttp_frame_hdr frh;
 
+    (void)filp;
+    (void)ppos;
+
     if (nbytes < 1) {
         return -EFAULT;
     }
@@ -278,8 +295,6 @@ static ssize_t ttpoe_noc_debug_write (struct file *filp, const char __user *user
         TTP_DBG ("%s: noc debug payload dropped: ttp is shutdown\n", __FUNCTION__);
         return -ENETDOWN;
     }
-
-    filp->private_data = &ttp_debug_target;
 
     if (nbytes > TTP_NOC_DAT_SIZE) {
         nbytes = TTP_NOC_DAT_SIZE;
@@ -328,11 +343,14 @@ end:
 
 static int ttpoe_noc_debug_open (struct inode *inode, struct file *filp)
 {
+    (void)inode;
+    filp->private_data = NULL;
     return 0;
 }
 
 static int ttpoe_noc_debug_mmap (struct file *filp, struct vm_area_struct *vma)
 {
+    (void)filp;
     vma->vm_pgoff = virt_to_phys (ttp_noc_debug_page) >> PAGE_SHIFT;
     return remap_pfn_range (vma, vma->vm_start, vma->vm_pgoff,
                             vma->vm_end - vma->vm_start, vma->vm_page_prot);
@@ -341,7 +359,7 @@ static int ttpoe_noc_debug_mmap (struct file *filp, struct vm_area_struct *vma)
 static ssize_t ttpoe_noc_debug_read (struct file *filp, char *buf,
                                      size_t nbytes, loff_t *ppos)
 {
-    int kc, rc;
+    int kc;
 
     TTP_DB1 ("%s: %s (%lld/%zu)\n", __FUNCTION__, filp->f_path.dentry->d_name.name,
              *ppos, nbytes);
@@ -350,14 +368,12 @@ static ssize_t ttpoe_noc_debug_read (struct file *filp, char *buf,
         return -EIO;
     }
 
-    filp->private_data = &ttp_debug_target;
-
     kc = min ((int)(ttp_noc_debug_len - *ppos), (int)nbytes);
     if (*ppos >= ttp_noc_debug_len) {
         return 0;
     }
 
-    if ((rc = copy_to_user (buf, ttp_noc_debug_page + *ppos, kc)) < 0) {
+    if (copy_to_user (buf, ttp_noc_debug_page + *ppos, kc)) {
         return -EIO;
     }
 
@@ -367,13 +383,11 @@ static ssize_t ttpoe_noc_debug_read (struct file *filp, char *buf,
 
 static int ttpoe_noc_debug_release (struct inode *inode, struct file *filp)
 {
-    /* filp->private_data didn't get set by read/write => Erase noc-buffer */
-    if (!filp->private_data) {
-        ttp_noc_debug_len = 0;
-        memset (ttp_noc_debug_page, 0, PAGE_SIZE);
-        TTP_DB1 ("%s: noc_debug: Erased\n", __FUNCTION__);
-    }
-
+    (void)inode;
+    (void)filp;
+    ttp_noc_debug_len = 0;
+    memset (ttp_noc_debug_page, 0, PAGE_SIZE);
+    TTP_DB1 ("%s: noc_debug: Erased\n", __FUNCTION__);
     return 0;
 }
 
@@ -391,6 +405,7 @@ static const struct file_operations ttpoe_noc_debug_fops = {
 int __init ttpoe_noc_debug_init (void)
 {
     int rv;
+    bool chrdev_registered = false;
 
     if (!(ttp_noc_debug_page = (char *)get_zeroed_page (GFP_DMA))) {
         rv = -ENOMEM;
@@ -402,6 +417,7 @@ int __init ttpoe_noc_debug_init (void)
         rv = -EIO;
         goto out;
     }
+    chrdev_registered = true;
 
     if (IS_ERR (ttp_class = ttp_wrap_class_create ("ttpoe"))) {
         rv = PTR_ERR (ttp_class);
@@ -425,6 +441,9 @@ out:
     if (ttp_class) {
         class_destroy (ttp_class);
     }
+    if (chrdev_registered) {
+        unregister_chrdev (TTP_MAJOR_DEV_NUM, "ttpoe");
+    }
     if (ttp_noc_debug_page) {
         free_page ((unsigned long)ttp_noc_debug_page);
     }
@@ -434,11 +453,11 @@ out:
 }
 
 
-void __exit ttpoe_noc_debug_exit (void)
+void ttpoe_noc_debug_exit (void)
 {
     device_destroy (ttp_class, MKDEV (TTP_MAJOR_DEV_NUM, 0));
     class_destroy (ttp_class);
-    unregister_chrdev (TTP_MAJOR_DEV_NUM, "noc_debug");
+    unregister_chrdev (TTP_MAJOR_DEV_NUM, "ttpoe");
     if (ttp_noc_debug_page) {
         free_page ((unsigned long)ttp_noc_debug_page);
     }
