@@ -174,6 +174,70 @@ static void ttp_tag_signal_tag (struct ttp_fsm_event *ev)
 }
 
 
+bool ttp_tag_has_pending_noc (struct ttp_link_tag *lt)
+{
+    bool pending = false;
+
+    if (!lt) {
+        return false;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+    pending = !list_empty (&lt->ncq);
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+
+    if (pending) {
+        return true;
+    }
+
+    TTP_RUN_SPIN_LOCKED ({
+        pending = !!(lt->tct || lt->txt);
+    });
+
+    return pending;
+}
+
+
+void ttp_tag_mark_orphaned (struct ttp_link_tag *lt)
+{
+    if (!lt) {
+        return;
+    }
+
+    TTP_RUN_SPIN_LOCKED ({
+        lt->sock_orphaned = true;
+    });
+}
+
+
+void ttp_tag_maybe_cleanup_orphan (struct ttp_link_tag *lt)
+{
+    int tv;
+    bool should_reset = false;
+    bool queue_empty = false;
+
+    if (!lt) {
+        return;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+    queue_empty = list_empty (&lt->ncq);
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+
+    TTP_RUN_SPIN_LOCKED ({
+        should_reset = lt->sock_orphaned && !lt->sock && !lt->tct && !lt->txt;
+    });
+
+    if (queue_empty && should_reset) {
+        if (timer_pending (&lt->tmr)) {
+            tv = del_timer (&lt->tmr);
+            (void)tv;
+        }
+        ttp_tag_reset (lt);
+    }
+}
+
+
 TTP_NOINLINE
 static enum ttp_states_enum ttp_tag_get_state (u64 kid)
 {
@@ -193,6 +257,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->state       = TTP_ST__CLOSED;
     lt->sock        = NULL;
     lt->sock_managed = false;
+    lt->sock_orphaned = false;
 
     lt->retire_ptr  = 0;
     lt->current_ptr = 0;
@@ -264,6 +329,7 @@ int ttp_tag_add (u64 kid)
             lt->state = TTP_ST__CLOSED;
             lt->sock = NULL;
             lt->sock_managed = false;
+            lt->sock_orphaned = false;
 
             lt->_rkid = kid;
             ttp_rbtree_tag_add (lt);
@@ -913,6 +979,7 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
     TTP_EVLOG (tev, TTP_LG__NOC_PAYLOAD_DROP, TTP_OP__TTP_PAYLOAD);
 
     ttp_evt_pput (tev);
+    ttp_tag_maybe_cleanup_orphan (lt);
 
     /* HACK: trigger timeout to retry sending next nocq element */
     if (ttp_evt_pget (&ev)) {

@@ -154,12 +154,13 @@ static int ttp_sock_bind_tag(struct ttp_sock *tsk, u64 kid)
     }
 
     TTP_RUN_SPIN_LOCKED({
-        if (lt->sock && lt->sock != tsk) {
+        if ((lt->sock && lt->sock != tsk) || lt->sock_orphaned) {
             rc = -EBUSY;
         } else if (!lt->sock) {
             sock_hold(&tsk->sk);
             lt->sock = tsk;
             lt->sock_managed = true;
+            lt->sock_orphaned = false;
         }
     });
 
@@ -209,17 +210,30 @@ static void ttp_sock_disconnect(struct ttp_sock *tsk)
 {
     unsigned long flags;
     u64 kid;
+    int state;
     struct ttp_link_tag *lt;
+    bool defer_reset = false;
 
     spin_lock_irqsave(&tsk->lock, flags);
     kid = tsk->kid;
+    state = tsk->state;
     spin_unlock_irqrestore(&tsk->lock, flags);
 
     if (kid) {
-        ttp_sock_unbind_tag(tsk);
         lt = ttp_rbtree_tag_get(kid);
+        if (lt && state == TTP_SS_ESTABLISHED && ttp_tag_has_pending_noc(lt)) {
+            ttp_tag_mark_orphaned(lt);
+            defer_reset = true;
+        }
+
+        ttp_sock_unbind_tag(tsk);
         if (lt) {
-            ttp_tag_force_reset(lt);
+            if (defer_reset) {
+                ttp_noc_requ(lt);
+                ttp_tag_maybe_cleanup_orphan(lt);
+            } else {
+                ttp_tag_force_reset(lt);
+            }
         }
     }
     skb_queue_purge(&tsk->rxq);

@@ -808,6 +808,7 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_ACK (struct ttp_fsm_event *qev)
     lt->tct--;
     lt->try = 0;
     ttp_stats.nocq--;
+    ttp_tag_maybe_cleanup_orphan (lt);
 
 requ:
     ttp_noc_requ (lt);

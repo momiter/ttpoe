@@ -8,12 +8,16 @@ usage:
   ./ttp_sock_smoke.sh trunc-recv    <ifname> <vci> <peer-node> <recv-len>
   ./ttp_sock_smoke.sh dontwait-recv <ifname> <vci> <peer-node> [recv-len]
   ./ttp_sock_smoke.sh send          <ifname> <vci> <peer-node> <message>
+  ./ttp_sock_smoke.sh send-exit     <ifname> <vci> <peer-node> <message>
+  ./ttp_sock_smoke.sh send-wait     <ifname> <vci> <peer-node> <message> <linger-ms>
 
 examples:
   ./ttp_sock_smoke.sh normal-recv vleth 0 00:00:02
   ./ttp_sock_smoke.sh trunc-recv  vleth 0 00:00:02 8
   ./ttp_sock_smoke.sh dontwait-recv vleth 0 00:00:02
   ./ttp_sock_smoke.sh send vleth 0 00:00:01 hello
+  ./ttp_sock_smoke.sh send-exit vleth 0 00:00:01 hello
+  ./ttp_sock_smoke.sh send-wait vleth 0 00:00:01 hello 500
 
 notes:
   1. run 'make -C tests' first on a Linux host
@@ -45,6 +49,12 @@ case "$mode" in
         exec ./ttp_sock_server "$1" "$2" "$3" "$4" --dontwait
         ;;
     send)
+        exec ./ttp_sock_client "$@"
+        ;;
+    send-exit)
+        exec ./ttp_sock_client "$@"
+        ;;
+    send-wait)
         exec ./ttp_sock_client "$@"
         ;;
     *)

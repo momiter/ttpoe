@@ -209,6 +209,7 @@ struct ttp_link_tag {
     atomic_t opens;
     struct ttp_sock *sock;
     bool sock_managed;
+    bool sock_orphaned;
 
     union {
         struct {
@@ -316,6 +317,9 @@ extern u64  ttp_tag_key_make (const u8 *mac, u8 vc, bool gw, bool t3);
 extern int  ttp_tag_add (u64 kid);
 extern void ttp_tag_reset (struct ttp_link_tag *lt);
 extern void ttp_tag_force_reset (struct ttp_link_tag *lt);
+extern bool ttp_tag_has_pending_noc (struct ttp_link_tag *lt);
+extern void ttp_tag_mark_orphaned (struct ttp_link_tag *lt);
+extern void ttp_tag_maybe_cleanup_orphan (struct ttp_link_tag *lt);
 
 extern void ttp_fsm_evlog_add (const char *fl, const int ln, const char *fn,
                                const int pos, struct ttp_fsm_event *qev,

@@ -29,6 +29,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <ifname> <vci> <peer-node> [recv-len] [--dontwait]\n",
                 argv[0]);
+        fprintf(stderr, "note: both peers actively connect before the recv side blocks for payload\n");
         return 2;
     }
 
@@ -84,6 +85,8 @@ int main(int argc, char **argv)
         close(fd);
         return 1;
     }
+
+    printf("connected over family %d, waiting for payload...\n", family);
 
     memset(&msg, 0, sizeof(msg));
     iov.iov_base = buffer;

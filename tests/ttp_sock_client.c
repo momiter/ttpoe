@@ -1,4 +1,5 @@
 #include <net/if.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,11 +15,25 @@ int main(int argc, char **argv)
     struct sockaddr_ttp peer = {0};
     int family;
     int fd;
+    int linger_ms = -1;
     ssize_t n;
 
-    if (argc != 5) {
-        fprintf(stderr, "usage: %s <ifname> <vci> <peer-node> <message>\n", argv[0]);
+    if (argc != 5 && argc != 6) {
+        fprintf(stderr,
+                "usage: %s <ifname> <vci> <peer-node> <message> [linger-ms]\n",
+                argv[0]);
+        fprintf(stderr, "note: both peers actively connect; linger-ms keeps the client alive briefly for debugging\n");
         return 2;
+    }
+
+    if (argc == 6) {
+        char *end = NULL;
+
+        linger_ms = (int)strtol(argv[5], &end, 0);
+        if (!end || *end != '\0' || linger_ms < 0) {
+            fprintf(stderr, "invalid linger-ms '%s'\n", argv[5]);
+            return 2;
+        }
     }
 
     family = ttp_socket_family_detect();
@@ -66,6 +81,10 @@ int main(int argc, char **argv)
     }
 
     printf("sent %zd bytes over family %d\n", n, family);
+    if (linger_ms >= 0) {
+        printf("waiting %d ms before close\n", linger_ms);
+        (void)poll(NULL, 0, linger_ms);
+    }
     close(fd);
     return 0;
 }
