@@ -49,6 +49,7 @@
 extern u32 ttp_ipv4_prefix;
 extern u32 ttp_ipv4_pfxlen;
 extern int ttp_ipv4_encap;
+extern int ttp_tx_window;
 extern u8  ttp_nhmac[ETH_ALEN];
 
 #define TTP_NOC_BUF_SIZE  (1024) /* Size of NOC buffer, including NOC Header + Data */

@@ -92,7 +92,12 @@ struct ttp_fsm_event {
     struct ttp_pkt_info   psi;
     struct sk_buff       *rsk;
     struct sk_buff       *tsk;
+    u8                    tx_flags;
 } __attribute__((packed));
+
+#define TTP_NOC_TXF_SENT     BIT(0)
+#define TTP_NOC_TXF_ACKED    BIT(1)
+#define TTP_NOC_TXF_RETRANS  BIT(2)
 
 struct ttp_sock;
 
@@ -205,6 +210,9 @@ struct ttp_link_tag {
     u32 rx_seq_id;
     u32 tx_seq_id;
     u32 retire_id;
+    u32 base_seq;
+    u32 next_seq;
+    u32 retransmit_from;
 
     atomic_t opens;
     struct ttp_sock *sock;
@@ -340,5 +348,8 @@ extern void ttp_evt_enqu (struct ttp_fsm_event *ev);
 
 extern void ttp_evt_cpqu (struct ttp_fsm_event *ev);
 extern bool ttp_evt_pget (struct ttp_fsm_event **evp);
+extern bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced);
+extern bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq);
+extern void ttp_noc_mark_timeout (struct ttp_link_tag *lt);
 
 #endif

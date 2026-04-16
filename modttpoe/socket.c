@@ -113,6 +113,20 @@ static void ttp_sock_put(struct ttp_sock *tsk)
     }
 }
 
+void ttpoe_socket_link_error(u64 kid, int err)
+{
+    struct ttp_sock *tsk;
+
+    tsk = ttp_sock_lookup_kid(kid);
+    if (!tsk) {
+        return;
+    }
+
+    ttp_sock_set_error(tsk, err);
+    ttp_sock_unbind_tag(tsk);
+    ttp_sock_put(tsk);
+}
+
 static void ttp_sock_set_state(struct ttp_sock *tsk, int state)
 {
     unsigned long flags;

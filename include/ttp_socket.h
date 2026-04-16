@@ -8,7 +8,7 @@
 
 
 #ifndef AF_TTP
-#define AF_TTP 37
+#define AF_TTP 28
 #endif
 
 #define PF_TTP AF_TTP

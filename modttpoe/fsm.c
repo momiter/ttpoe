@@ -459,6 +459,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
     struct ttp_frame_hdr frh;
     struct ttp_pkt_info  pif = {0};
     enum ttp_opcodes_enum op = TTP_OP__TTP_ACK;
+    u32 ack_seq = 0;
 
     ttp_skb_pars (ev->rsk, &frh, &pif);
 
@@ -507,6 +508,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
 
             op = TTP_OP__TTP_ACK;
             lt->rx_seq_id++;    /* update tag-rx-seq-id */
+            ack_seq = pif.txi_seq;
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_RX, op);
             TTP_DB1 ("`-> %s: ACK payload seq-id:%d (exp:%d+1)\n",
@@ -515,6 +517,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
         }
         else if (pif.txi_seq && ((lt->rx_seq_id + 1) > pif.txi_seq)) {
             op = TTP_OP__TTP_ACK;
+            ack_seq = pif.txi_seq;
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DUP, op);
             TTP_DB1 ("`-> %s: ACK duplicate seq-id:%d (exp:%d+1)\n",
@@ -523,6 +526,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
         }
         else if (lt->rx_seq_id < pif.txi_seq) {
             op = TTP_OP__TTP_NACK;
+            ack_seq = lt->rx_seq_id + 1;
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, op);
             TTP_DB1 ("`-> %s: NACK future seq-id:%d (exp:%d+1)\n",
@@ -531,6 +535,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
         }
         else {
             op = TTP_OP__TTP_NACK;
+            ack_seq = lt->rx_seq_id + 1;
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, op);
             TTP_DB1 ("`-> %s: NACK *UNEXPECTED* seq-id:%d (exp:%d+1)\n",
@@ -547,7 +552,7 @@ send:
 
     ttp_skb_pars (skb, &frh, NULL);
 
-    ev->psi.rxi_seq = lt->rx_seq_id;
+    ev->psi.rxi_seq = ack_seq ? ack_seq : lt->rx_seq_id;
     frh.ttp->conn_rx_seq = htonl (ev->psi.rxi_seq);
     frh.ttp->conn_tx_seq = ev->psi.txi_seq = 0; /* tx-id=0 for ACKs */
 
@@ -571,6 +576,7 @@ static bool ttp_fsm_rs__REPLAY_DATA (struct ttp_fsm_event *ev)
         return false;
     }
 
+    ttp_noc_mark_timeout (lt);
     ttp_noc_requ (lt);
     return true;
 }
@@ -612,14 +618,16 @@ static bool ttp_fsm_rs__PAYLOAD (struct ttp_fsm_event *ev)
         TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
     }
 
-    if (timer_pending (&lt->tmr)) {
-        mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT));
-        TTP_EVLOG (ev, TTP_LG__LN_TIMER_RESTART, TTP_OP__invalid);
-    }
-    else {
-        lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT);
-        add_timer (&lt->tmr);
-        TTP_EVLOG (ev, TTP_LG__LN_TIMER_START, TTP_OP__invalid);
+    if (ev->psi.txi_seq == lt->base_seq) {
+        if (timer_pending (&lt->tmr)) {
+            mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT));
+            TTP_EVLOG (ev, TTP_LG__LN_TIMER_RESTART, TTP_OP__invalid);
+        }
+        else {
+            lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT);
+            add_timer (&lt->tmr);
+            TTP_EVLOG (ev, TTP_LG__LN_TIMER_START, TTP_OP__invalid);
+        }
     }
 
     TTP_DB1 ("%s: 0x%016llx.%d <<Sent: %s<<\n", __FUNCTION__,
@@ -669,14 +677,16 @@ static bool ttp_fsm_rs__PAYLOAD2 (struct ttp_fsm_event *ev)
         TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
     }
 
-    if (timer_pending (&lt->tmr)) {
-        mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD2_SENT));
-        TTP_EVLOG (ev, TTP_LG__LN_TIMER_RESTART, TTP_OP__invalid);
-    }
-    else {
-        lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD2_SENT);
-        add_timer (&lt->tmr);
-        TTP_EVLOG (ev, TTP_LG__LN_TIMER_START, TTP_OP__invalid);
+    if (ev->psi.txi_seq == lt->base_seq) {
+        if (timer_pending (&lt->tmr)) {
+            mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD2_SENT));
+            TTP_EVLOG (ev, TTP_LG__LN_TIMER_RESTART, TTP_OP__invalid);
+        }
+        else {
+            lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD2_SENT);
+            add_timer (&lt->tmr);
+            TTP_EVLOG (ev, TTP_LG__LN_TIMER_START, TTP_OP__invalid);
+        }
     }
 
     TTP_DB1 ("%s: 0x%016llx.%d <<Sent: %s<<\n", __FUNCTION__,
@@ -763,8 +773,9 @@ TTP_NOINLINE
 static bool ttp_fsm_ev_hdl__RXQ__TTP_ACK (struct ttp_fsm_event *qev)
 {
     int tv;
+    bool advanced = false;
+    bool matched = false;
     struct ttp_link_tag *lt;
-    struct ttp_fsm_event *ev;
 
     TTP_DB1 ("%s: 0x%016llx.%d: rx:%d tx:%d\n", __FUNCTION__,
              cpu_to_be64 (qev->kid), qev->idx, qev->psi.rxi_seq, qev->psi.txi_seq);
@@ -773,55 +784,41 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_ACK (struct ttp_fsm_event *qev)
         return false;
     }
 
-    if (timer_pending (&lt->tmr)) {
-        tv = del_timer (&lt->tmr);
-        TTP_EVLOG (qev, TTP_LG__TIMER_DELETE, TTP_OP__TTP_ACK);
+    matched = ttp_noc_ack_seq (lt, qev->psi.rxi_seq, &advanced);
+    if (!matched) {
+        TTP_DB1 ("`-> %s: ack-rx:%d not pending\n", __FUNCTION__, qev->psi.rxi_seq);
     }
 
-    mutex_lock (&ttp_global_root_head.event_mutx);
-
-    if (!(ev = list_first_entry_or_null (&lt->ncq, struct ttp_fsm_event, elm))) {
-        mutex_unlock (&ttp_global_root_head.event_mutx);
-        TTP_DB1 ("`-> %s: noc-queue drained\n", __FUNCTION__);
-        return false;
+    if (advanced) {
+        if (ttp_tag_has_pending_noc (lt)) {
+            if (timer_pending (&lt->tmr)) {
+                mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT));
+                TTP_EVLOG (qev, TTP_LG__LN_TIMER_RESTART, TTP_OP__TTP_ACK);
+            }
+            else {
+                lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT);
+                add_timer (&lt->tmr);
+                TTP_EVLOG (qev, TTP_LG__LN_TIMER_START, TTP_OP__TTP_ACK);
+            }
+        }
+        else if (timer_pending (&lt->tmr)) {
+            tv = del_timer (&lt->tmr);
+            (void)tv;
+            TTP_EVLOG (qev, TTP_LG__TIMER_DELETE, TTP_OP__TTP_ACK);
+        }
     }
-
-    /* process ACK'ed rx-seq-id, match to sent tx-seq-id and free noc data below */
-    if (ev->psi.txi_seq != qev->psi.rxi_seq) {
-        mutex_unlock (&ttp_global_root_head.event_mutx);
-        TTP_DB1 ("`-> %s: seq-id mismatch: ack-rx:%d ev-tx:%d\n", __FUNCTION__,
-                 qev->psi.rxi_seq, ev->psi.txi_seq);
-        goto requ;
-    }
-
-    lt->retire_id = ev->psi.txi_seq; /* store seq-id of last retired payload */
-
-    TTP_DB1 ("`-> %s: noc-data free: ev-tx:%d\n", __FUNCTION__, ev->psi.txi_seq);
-    TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_FREE, TTP_OP__TTP_ACK);
-
-    list_del (&ev->elm);
-
-    mutex_unlock (&ttp_global_root_head.event_mutx);
-
-    ttp_evt_pput (ev);
-
-    lt->tct--;
-    lt->try = 0;
-    ttp_stats.nocq--;
-    ttp_tag_maybe_cleanup_orphan (lt);
 
 requ:
     ttp_noc_requ (lt);
-    return true;
+    return matched;
 }
 
 
 TTP_NOINLINE
 static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK (struct ttp_fsm_event *qev)
 {
-    int tv;
+    bool marked;
     struct ttp_link_tag *lt;
-    struct ttp_fsm_event *ev;
 
     TTP_DB1 ("%s: 0x%016llx.%d: rx:%d tx:%d\n", __FUNCTION__,
              cpu_to_be64 (qev->kid), qev->idx, qev->psi.rxi_seq, qev->psi.txi_seq);
@@ -830,32 +827,22 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK (struct ttp_fsm_event *qev)
         return false;
     }
 
-    if (timer_pending (&lt->tmr)) {
-        tv = del_timer (&lt->tmr);
-        TTP_EVLOG (qev, TTP_LG__TIMER_DELETE, TTP_OP__TTP_NACK);
+    marked = ttp_noc_mark_retransmit_from (lt, qev->psi.rxi_seq);
+    if (marked) {
+        if (timer_pending (&lt->tmr)) {
+            mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT));
+            TTP_EVLOG (qev, TTP_LG__LN_TIMER_RESTART, TTP_OP__TTP_NACK);
+        }
+        else {
+            lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT);
+            add_timer (&lt->tmr);
+            TTP_EVLOG (qev, TTP_LG__LN_TIMER_START, TTP_OP__TTP_NACK);
+        }
     }
-
-    mutex_lock (&ttp_global_root_head.event_mutx);
-
-    if (!(ev = list_first_entry_or_null (&lt->ncq, struct ttp_fsm_event, elm))) {
-        mutex_unlock (&ttp_global_root_head.event_mutx);
-        TTP_DB1 ("`-> %s: noc-queue drained\n", __FUNCTION__);
-        return false;
-    }
-
-    /* process ACK'ed rx-seq-id, match to sent tx-seq-id and free noc data below */
-    if (ev->psi.txi_seq != qev->psi.rxi_seq) {
-        mutex_unlock (&ttp_global_root_head.event_mutx);
-        TTP_DB1 ("`-> %s: seq-id mismatch: ack-rx:%d ev-tx:%d\n", __FUNCTION__,
-                 qev->psi.rxi_seq, ev->psi.txi_seq);
-        goto requ;
-    }
-
-    mutex_unlock (&ttp_global_root_head.event_mutx);
 
 requ:
     ttp_noc_requ (lt);
-    return true;
+    return marked;
 }
 
 

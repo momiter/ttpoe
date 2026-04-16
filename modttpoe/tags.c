@@ -62,6 +62,7 @@
 #include <linux/ip.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
+#include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/crc16.h>
 #include <net/addrconf.h>
@@ -74,6 +75,7 @@
 #include "tags.h"
 #include "print.h"
 #include "noc.h"
+#include "socket.h"
 
 
 struct ttp_link_tag_global ttp_global_root_head;
@@ -237,6 +239,235 @@ void ttp_tag_maybe_cleanup_orphan (struct ttp_link_tag *lt)
     }
 }
 
+static inline bool ttp_noc_evt_is_sent (const struct ttp_fsm_event *ev)
+{
+    return !!(ev->tx_flags & TTP_NOC_TXF_SENT);
+}
+
+static inline bool ttp_noc_evt_is_acked (const struct ttp_fsm_event *ev)
+{
+    return !!(ev->tx_flags & TTP_NOC_TXF_ACKED);
+}
+
+static inline bool ttp_noc_evt_is_retrans (const struct ttp_fsm_event *ev)
+{
+    return !!(ev->tx_flags & TTP_NOC_TXF_RETRANS);
+}
+
+static struct ttp_fsm_event *ttp_noc_find_seq_locked (struct ttp_link_tag *lt, u32 seq)
+{
+    struct ttp_fsm_event *ev;
+
+    list_for_each_entry (ev, &lt->ncq, elm) {
+        if (ev->psi.txi_seq == seq) {
+            return ev;
+        }
+    }
+
+    return NULL;
+}
+
+static struct ttp_fsm_event *ttp_noc_first_unacked_locked (struct ttp_link_tag *lt)
+{
+    struct ttp_fsm_event *ev;
+
+    list_for_each_entry (ev, &lt->ncq, elm) {
+        if (!ttp_noc_evt_is_acked (ev)) {
+            return ev;
+        }
+    }
+
+    return NULL;
+}
+
+static struct ttp_fsm_event *ttp_noc_first_unsent_locked (struct ttp_link_tag *lt)
+{
+    struct ttp_fsm_event *ev;
+
+    list_for_each_entry (ev, &lt->ncq, elm) {
+        if (!ttp_noc_evt_is_acked (ev) && !ttp_noc_evt_is_sent (ev)) {
+            return ev;
+        }
+    }
+
+    return NULL;
+}
+
+static struct ttp_fsm_event *ttp_noc_first_retrans_locked (struct ttp_link_tag *lt)
+{
+    struct ttp_fsm_event *ev;
+
+    list_for_each_entry (ev, &lt->ncq, elm) {
+        if (ttp_noc_evt_is_acked (ev) || !ttp_noc_evt_is_sent (ev) || !ttp_noc_evt_is_retrans (ev)) {
+            continue;
+        }
+        if (!lt->retransmit_from || ev->psi.txi_seq >= lt->retransmit_from) {
+            return ev;
+        }
+    }
+
+    return NULL;
+}
+
+static u16 ttp_noc_inflight_locked (struct ttp_link_tag *lt)
+{
+    u16 cnt = 0;
+    struct ttp_fsm_event *ev;
+
+    list_for_each_entry (ev, &lt->ncq, elm) {
+        if (ttp_noc_evt_is_sent (ev) && !ttp_noc_evt_is_acked (ev)) {
+            cnt++;
+        }
+    }
+
+    return cnt;
+}
+
+static void ttp_noc_refresh_window_locked (struct ttp_link_tag *lt)
+{
+    struct ttp_fsm_event *ev;
+
+    ev = ttp_noc_first_unacked_locked (lt);
+    if (!ev) {
+        lt->base_seq = lt->tx_seq_id;
+        lt->next_seq = lt->tx_seq_id;
+        lt->retransmit_from = 0;
+        return;
+    }
+
+    lt->base_seq = ev->psi.txi_seq;
+    lt->next_seq = lt->tx_seq_id;
+
+    if (lt->retransmit_from && lt->retransmit_from < lt->base_seq) {
+        lt->retransmit_from = lt->base_seq;
+    }
+    if (lt->retransmit_from && !ttp_noc_first_retrans_locked (lt)) {
+        lt->retransmit_from = 0;
+    }
+}
+
+bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced)
+{
+    LIST_HEAD (retired);
+    bool matched = false;
+    bool moved = false;
+    u32 old_base = 0;
+    struct ttp_fsm_event *ev, *tmp;
+
+    if (advanced) {
+        *advanced = false;
+    }
+    if (!lt) {
+        return false;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+
+    old_base = lt->base_seq;
+    if (ack_seq && ack_seq < lt->base_seq) {
+        matched = true;
+        goto out_unlock;
+    }
+
+    if ((ev = ttp_noc_find_seq_locked (lt, ack_seq)) && !ttp_noc_evt_is_acked (ev)) {
+        ev->tx_flags |= TTP_NOC_TXF_ACKED;
+        matched = true;
+    }
+
+    list_for_each_entry_safe (ev, tmp, &lt->ncq, elm) {
+        if (!ttp_noc_evt_is_acked (ev)) {
+            break;
+        }
+        TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_FREE, TTP_OP__TTP_ACK);
+        list_del (&ev->elm);
+        list_add_tail (&ev->elm, &retired);
+        lt->retire_id = ev->psi.txi_seq;
+        lt->tct--;
+        ttp_stats.nocq--;
+        moved = true;
+    }
+
+    ttp_noc_refresh_window_locked (lt);
+    if (moved && lt->base_seq != old_base) {
+        lt->try = 0;
+    }
+
+out_unlock:
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+
+    list_for_each_entry_safe (ev, tmp, &retired, elm) {
+        list_del (&ev->elm);
+        ttp_evt_pput (ev);
+    }
+
+    if (advanced) {
+        *advanced = moved;
+    }
+
+    if (moved) {
+        ttp_tag_maybe_cleanup_orphan (lt);
+    }
+
+    return matched;
+}
+
+bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
+{
+    bool marked = false;
+    struct ttp_fsm_event *ev;
+
+    if (!lt || !seq) {
+        return false;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+
+    list_for_each_entry (ev, &lt->ncq, elm) {
+        if (ev->psi.txi_seq < seq) {
+            continue;
+        }
+        if (ttp_noc_evt_is_acked (ev) || !ttp_noc_evt_is_sent (ev)) {
+            continue;
+        }
+        ev->tx_flags |= TTP_NOC_TXF_RETRANS;
+        marked = true;
+    }
+
+    if (marked && (!lt->retransmit_from || seq < lt->retransmit_from)) {
+        lt->retransmit_from = seq;
+    }
+
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+    return marked;
+}
+
+void ttp_noc_mark_timeout (struct ttp_link_tag *lt)
+{
+    struct ttp_fsm_event *ev;
+
+    if (!lt) {
+        return;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+    ttp_noc_refresh_window_locked (lt);
+    if (lt->base_seq && lt->base_seq < lt->tx_seq_id) {
+        list_for_each_entry (ev, &lt->ncq, elm) {
+            if (ev->psi.txi_seq < lt->base_seq) {
+                continue;
+            }
+            if (ttp_noc_evt_is_acked (ev) || !ttp_noc_evt_is_sent (ev)) {
+                continue;
+            }
+            ev->tx_flags |= TTP_NOC_TXF_RETRANS;
+        }
+        if (!lt->retransmit_from || lt->base_seq < lt->retransmit_from) {
+            lt->retransmit_from = lt->base_seq;
+        }
+    }
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+}
+
 
 TTP_NOINLINE
 static enum ttp_states_enum ttp_tag_get_state (u64 kid)
@@ -266,9 +497,12 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->tx_seq_id   = 0;
     lt->rx_seq_id   = 0;
     lt->retire_id   = 0;
+    lt->base_seq    = 0;
+    lt->next_seq    = 0;
+    lt->retransmit_from = 0;
 
     lt->tex = false;    /* timer expired */
-    lt->twz = 1;        /* default window size (defaults to 1 for now) */
+    lt->twz = (u16)clamp_t (int, ttp_tx_window, 1, 64);
     lt->tct = 0;        /* tx-queue count */
     lt->txt = 0;        /* tx-scheduled count */
     lt->try = 0;        /* tx-retry count */
@@ -618,7 +852,8 @@ static bool ttp_evt_pget_locked (struct ttp_fsm_event **evp)
     BUG_ON (ev->tsk);
 
     ev->mrk = TTP_EVENTS_FENCE_FREE_ELEM;
-    ev->psi.noc_len = 0;
+    memset (&ev->psi, 0, sizeof (ev->psi));
+    ev->tx_flags = 0;
 
     list_del (&ev->elm);
     ttp_stats.pool--;
@@ -665,6 +900,8 @@ static void ttp_evt_pput_locked (struct ttp_fsm_event *ev)
     ev->kid = 0;
     ev->evt = TTP_EV__invalid;
     ev->mrk = TTP_EVENTS_FENCE_POOL_ELEM;
+    memset (&ev->psi, 0, sizeof (ev->psi));
+    ev->tx_flags = 0;
 
     list_add_tail (&ev->elm, &ttp_global_root_head.pool_head);
     ttp_stats.pool++;
@@ -927,67 +1164,92 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
 {
     static const int max_retry = 1000;
     struct ttp_fsm_event *ev, *tev;
+    bool scheduled = false;
+    bool fatal = false;
+    u16 inflight = 0;
 
-    if (timer_pending (&lt->tmr)) {
-        TTP_DBG ("%s: skip enqueue #%d\n", __FUNCTION__, lt->try);
+    if (!lt) {
         return;
     }
 
     mutex_lock (&ttp_global_root_head.event_mutx);
 
-    tev = list_first_entry_or_null (&lt->ncq, struct ttp_fsm_event, elm);
-    if (!tev) {                 /* exit if no evnt of is already in txq */
+    ttp_noc_refresh_window_locked (lt);
+    tev = ttp_noc_first_unacked_locked (lt);
+    if (!tev) {
         mutex_unlock (&ttp_global_root_head.event_mutx);
         TTP_DB1 ("%s: 0x%016llx.%d\n", __FUNCTION__,
-                 cpu_to_be64 (lt->_rkid), tev ? tev->idx : -1);
+                 cpu_to_be64 (lt->_rkid), -1);
         return;
     }
 
-    if (lt->try <= max_retry) { /* allow 'max_retry' re-tries */
-        if (lt->txt < lt->twz) { /* cp_enqueue while under window size */
-            if ((ev = ttp_evt_cpqu_locked (tev))) {
-                TTP_DB1 ("%s: `-> %senqueue#%d %s len:%d tx:%d mark:%s\n", __FUNCTION__,
-                         lt->try ? "re-" : "", lt->try, TTP_EVENT_NAME (tev->evt),
-                         ev->psi.noc_len, ev->psi.txi_seq,
-                         TTP_EVENTS_FENCE_TO_STR (tev->mrk));
-                if (lt->try) {
-                    TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_REQ, TTP_OP__TTP_PAYLOAD);
-                }
-
-                TTP_RUN_SPIN_LOCKED ({
-                    lt->txt++;
-                    lt->try++;    /* re/try with this tx-seq-id; increment retry count */
-                });
-
-                schedule_work (&lt->wkq);
+    while (lt->txt < lt->twz) {
+        ttp_noc_refresh_window_locked (lt);
+        tev = ttp_noc_first_retrans_locked (lt);
+        if (tev) {
+            if (tev->psi.txi_seq == lt->base_seq && lt->try >= max_retry) {
+                fatal = true;
+                break;
             }
+            ev = ttp_evt_cpqu_locked (tev);
+            if (!ev) {
+                break;
+            }
+            tev->tx_flags &= ~TTP_NOC_TXF_RETRANS;
+            lt->txt++;
+            if (tev->psi.txi_seq == lt->base_seq) {
+                lt->try++;
+            }
+            scheduled = true;
+            TTP_DB1 ("%s: `-> re-enqueue#%d %s len:%d tx:%d mark:%s\n", __FUNCTION__,
+                     lt->try, TTP_EVENT_NAME (tev->evt), ev->psi.noc_len, ev->psi.txi_seq,
+                     TTP_EVENTS_FENCE_TO_STR (tev->mrk));
+            TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_REQ, TTP_OP__TTP_PAYLOAD);
+            continue;
         }
-        mutex_unlock (&ttp_global_root_head.event_mutx);
-        return;
+
+        inflight = ttp_noc_inflight_locked (lt);
+        if (inflight >= lt->twz) {
+            break;
+        }
+
+        tev = ttp_noc_first_unsent_locked (lt);
+        if (!tev) {
+            break;
+        }
+
+        ev = ttp_evt_cpqu_locked (tev);
+        if (!ev) {
+            break;
+        }
+        tev->tx_flags |= TTP_NOC_TXF_SENT;
+        lt->txt++;
+        scheduled = true;
+        TTP_DB1 ("%s: `-> enqueue %s len:%d tx:%d mark:%s\n", __FUNCTION__,
+                 TTP_EVENT_NAME (tev->evt), ev->psi.noc_len, ev->psi.txi_seq,
+                 TTP_EVENTS_FENCE_TO_STR (tev->mrk));
     }
-
-    list_del (&tev->elm);       /* HACK: exceeded retry count - retire event */
-
-    lt->tct--;
-    lt->try = 0;
-    ttp_stats.nocq--;
-
     mutex_unlock (&ttp_global_root_head.event_mutx);
 
-    TTP_DB1 ("%s: 0x%016llx.%d >max re-tries(%d)\n", __FUNCTION__,
-             cpu_to_be64 (lt->_rkid), tev->idx, max_retry);
-    TTP_EVLOG (tev, TTP_LG__NOC_PAYLOAD_DROP, TTP_OP__TTP_PAYLOAD);
+    if (fatal) {
+        int dropped = lt->tct;
 
-    ttp_evt_pput (tev);
-    ttp_tag_maybe_cleanup_orphan (lt);
+        TTP_DB1 ("%s: 0x%016llx >max re-tries(%d) base:%u\n", __FUNCTION__,
+                 cpu_to_be64 (lt->_rkid), max_retry, lt->base_seq);
+        ttpoe_socket_link_error (lt->_rkid, ETIMEDOUT);
+        if (timer_pending (&lt->tmr)) {
+            del_timer (&lt->tmr);
+        }
+        while (ttp_noc_dequ (lt)) {
+            ;
+        }
+        ttp_stats.nocq -= dropped;
+        ttp_tag_reset (lt);
+        return;
+    }
 
-    /* HACK: trigger timeout to retry sending next nocq element */
-    if (ttp_evt_pget (&ev)) {
-        ev->evt = TTP_EV__INQ__TIMEOUT;
-        ev->kid = lt->_rkid;
-        ttp_evt_enqu (ev);
-        TTP_DB1 ("%s: wq: evnt: int__TIMEOUT\n", __FUNCTION__);
-        TTP_EVLOG (ev, TTP_LG__TIMER_TIMEOUT, TTP_OP__invalid);
+    if (scheduled) {
+        schedule_work (&lt->wkq);
     }
 }
 
@@ -1139,6 +1401,7 @@ void ttp_noc_enqu (struct ttp_fsm_event *ev)
         ev->psi.txi_seq = lt->tx_seq_id;
         lt->tct++;
         lt->tx_seq_id++;
+        lt->next_seq = lt->tx_seq_id;
         ttp_stats.nocq++;
     });
 
