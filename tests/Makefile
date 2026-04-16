@@ -13,4 +13,4 @@ ttp_sock_server: ttp_sock_server.o ttp_sock_common.o
 	$(CC) $(CFLAGS) -o $@ ttp_sock_server.o ttp_sock_common.o
 
 clean:
-	$(RM) *.o *.a ttp_sock_client ttp_sock_server
+	$(RM) *.o *.a ttp_sock_client ttp_sock_server recv_test.txt

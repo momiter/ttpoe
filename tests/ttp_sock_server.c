@@ -10,6 +10,8 @@
 #include "../include/ttp_socket.h"
 #include "ttp_sock_common.h"
 
+#define TTP_SOCK_OUTPUT_FILE "./recv_test.txt"
+
 int main(int argc, char **argv)
 {
     struct sockaddr_ttp local = {0};
@@ -23,13 +25,14 @@ int main(int argc, char **argv)
     int truncated = 0;
     int family;
     int fd;
+    FILE *out = NULL;
     ssize_t n;
 
     if (argc < 4 || argc > 6) {
         fprintf(stderr,
                 "usage: %s <ifname> <vci> <peer-node> [recv-len] [--dontwait]\n",
                 argv[0]);
-        fprintf(stderr, "note: both peers actively connect before the recv side blocks for payload\n");
+        fprintf(stderr, "note: received data is written to %s\n", TTP_SOCK_OUTPUT_FILE);
         return 2;
     }
 
@@ -107,10 +110,23 @@ int main(int argc, char **argv)
 
     truncated = !!(msg.msg_flags & MSG_TRUNC);
     display_len = truncated ? recv_len : (size_t)n;
-    buffer[display_len] = '\0';
-    printf("received %zd bytes over family %d (copied=%zu trunc=%s): %s\n",
+    out = fopen(TTP_SOCK_OUTPUT_FILE, "wb");
+    if (!out) {
+        perror("fopen(recv_test.txt)");
+        close(fd);
+        return 1;
+    }
+    if (display_len && fwrite(buffer, 1, display_len, out) != display_len) {
+        fprintf(stderr, "failed to write all data to %s\n", TTP_SOCK_OUTPUT_FILE);
+        fclose(out);
+        close(fd);
+        return 1;
+    }
+    fclose(out);
+
+    printf("received %zd bytes over family %d (copied=%zu trunc=%s), wrote %s\n",
            n, family, display_len, truncated ? "yes" : "no",
-           buffer);
+           TTP_SOCK_OUTPUT_FILE);
     close(fd);
     return 0;
 }

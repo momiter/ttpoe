@@ -7,22 +7,23 @@ usage:
   ./ttp_sock_smoke.sh normal-recv   <ifname> <vci> <peer-node>
   ./ttp_sock_smoke.sh trunc-recv    <ifname> <vci> <peer-node> <recv-len>
   ./ttp_sock_smoke.sh dontwait-recv <ifname> <vci> <peer-node> [recv-len]
-  ./ttp_sock_smoke.sh send          <ifname> <vci> <peer-node> <message>
-  ./ttp_sock_smoke.sh send-exit     <ifname> <vci> <peer-node> <message>
-  ./ttp_sock_smoke.sh send-wait     <ifname> <vci> <peer-node> <message> <linger-ms>
+  ./ttp_sock_smoke.sh send          <ifname> <vci> <peer-node>
+  ./ttp_sock_smoke.sh send-exit     <ifname> <vci> <peer-node>
+  ./ttp_sock_smoke.sh send-wait     <ifname> <vci> <peer-node> <linger-ms>
 
 examples:
   ./ttp_sock_smoke.sh normal-recv vleth 0 00:00:02
   ./ttp_sock_smoke.sh trunc-recv  vleth 0 00:00:02 8
   ./ttp_sock_smoke.sh dontwait-recv vleth 0 00:00:02
-  ./ttp_sock_smoke.sh send vleth 0 00:00:01 hello
-  ./ttp_sock_smoke.sh send-exit vleth 0 00:00:01 hello
-  ./ttp_sock_smoke.sh send-wait vleth 0 00:00:01 hello 500
+  ./ttp_sock_smoke.sh send vleth 0 00:00:01
+  ./ttp_sock_smoke.sh send-exit vleth 0 00:00:01
+  ./ttp_sock_smoke.sh send-wait vleth 0 00:00:01 500
 
 notes:
   1. run 'make -C tests' first on a Linux host
-  2. start the recv side before the send side
-  3. verify late packets do not leak into /dev/noc_debug by clearing it before a
+  2. place the payload to send in ./test.txt
+  3. start the recv side before the send side; received data is written to ./recv_test.txt
+  4. verify late packets do not leak into /dev/noc_debug by clearing it before a
      socket session and checking it stays empty after the socket closes
 EOF
 }
