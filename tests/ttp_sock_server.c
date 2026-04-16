@@ -1,4 +1,5 @@
 #include <net/if.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,12 @@
 #include "ttp_sock_common.h"
 
 #define TTP_SOCK_OUTPUT_FILE "./recv_test.txt"
+#define TTP_FILE_MAGIC "TTPF"
+
+struct ttp_file_header {
+    char magic[4];
+    unsigned int file_size_be;
+};
 
 int main(int argc, char **argv)
 {
@@ -26,6 +33,8 @@ int main(int argc, char **argv)
     int family;
     int fd;
     FILE *out = NULL;
+    size_t total_expected = 0;
+    size_t total_written = 0;
     ssize_t n;
 
     if (argc < 4 || argc > 6) {
@@ -102,31 +111,89 @@ int main(int argc, char **argv)
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             fprintf(stderr, "recvmsg: no data available (nonblocking)\n");
         } else {
-            perror("recvmsg");
+            perror("recvmsg(header)");
         }
         close(fd);
         return 1;
     }
+    if ((size_t)n < sizeof(struct ttp_file_header)) {
+        fprintf(stderr, "short file header: %zd bytes\n", n);
+        close(fd);
+        return 1;
+    }
+    if (msg.msg_flags & MSG_TRUNC) {
+        fprintf(stderr, "file header was truncated\n");
+        close(fd);
+        return 1;
+    }
+    {
+        struct ttp_file_header header;
 
-    truncated = !!(msg.msg_flags & MSG_TRUNC);
-    display_len = truncated ? recv_len : (size_t)n;
+        memcpy(&header, buffer, sizeof(header));
+        if (memcmp(header.magic, TTP_FILE_MAGIC, sizeof(header.magic)) != 0) {
+            fprintf(stderr, "invalid file header magic\n");
+            close(fd);
+            return 1;
+        }
+        total_expected = ntohl(header.file_size_be);
+        if (!total_expected) {
+            fprintf(stderr, "invalid file size 0 in header\n");
+            close(fd);
+            return 1;
+        }
+    }
+
     out = fopen(TTP_SOCK_OUTPUT_FILE, "wb");
     if (!out) {
         perror("fopen(recv_test.txt)");
         close(fd);
         return 1;
     }
-    if (display_len && fwrite(buffer, 1, display_len, out) != display_len) {
-        fprintf(stderr, "failed to write all data to %s\n", TTP_SOCK_OUTPUT_FILE);
-        fclose(out);
-        close(fd);
-        return 1;
+
+    while (total_written < total_expected) {
+        memset(&msg, 0, sizeof(msg));
+        iov.iov_base = buffer;
+        iov.iov_len = recv_len;
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+
+        n = recvmsg(fd, &msg, recv_flags);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                fprintf(stderr, "recvmsg: no data available before file completed\n");
+            } else {
+                perror("recvmsg(payload)");
+            }
+            fclose(out);
+            close(fd);
+            return 1;
+        }
+
+        truncated = !!(msg.msg_flags & MSG_TRUNC);
+        display_len = truncated ? recv_len : (size_t)n;
+        if (display_len > (total_expected - total_written)) {
+            display_len = total_expected - total_written;
+        }
+        if (display_len && fwrite(buffer, 1, display_len, out) != display_len) {
+            fprintf(stderr, "failed to write all data to %s\n", TTP_SOCK_OUTPUT_FILE);
+            fclose(out);
+            close(fd);
+            return 1;
+        }
+        total_written += display_len;
+
+        if (truncated) {
+            fprintf(stderr, "payload chunk was truncated after %zu of %zu bytes\n",
+                    total_written, total_expected);
+            fclose(out);
+            close(fd);
+            return 1;
+        }
     }
     fclose(out);
 
-    printf("received %zd bytes over family %d (copied=%zu trunc=%s), wrote %s\n",
-           n, family, display_len, truncated ? "yes" : "no",
-           TTP_SOCK_OUTPUT_FILE);
+    printf("received file of %zu bytes over family %d, wrote %s\n",
+           total_written, family, TTP_SOCK_OUTPUT_FILE);
     close(fd);
     return 0;
 }

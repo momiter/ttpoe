@@ -21,7 +21,7 @@ examples:
 
 notes:
   1. run 'make -C tests' first on a Linux host
-  2. place the payload to send in ./test.txt
+  2. place the file content to send in ./test.txt; large files are sent in 1008-byte chunks
   3. start the recv side before the send side; received data is written to ./recv_test.txt
   4. verify late packets do not leak into /dev/noc_debug by clearing it before a
      socket session and checking it stays empty after the socket closes
