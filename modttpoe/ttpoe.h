@@ -213,7 +213,7 @@ struct ttp_ttpoe_noc_hdr {
 #define TTP_SOCK_FRAG_F_FIRST  BIT(0)
 #define TTP_SOCK_FRAG_F_LAST   BIT(1)
 #define TTP_SOCK_FRAG_META_VER 0x01
-#define TTP_SOCK_FRAG_DATA_MAX (TTP_NOC_DAT_SIZE - sizeof (struct ttp_ttpoe_noc_hdr))
+#define TTP_SOCK_FRAG_DATA_MAX TTP_NOC_DAT_SIZE
 
 
 struct ttp_ttpoe_noc_dat {
