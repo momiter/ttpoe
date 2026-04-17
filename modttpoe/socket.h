@@ -31,6 +31,9 @@ struct ttp_sock {
     spinlock_t lock;
     wait_queue_head_t waitq;
     struct sk_buff_head rxq;
+    struct sk_buff *reasm_skb;
+    u32 reasm_total_len;
+    u32 reasm_next_off;
 };
 
 extern struct proto ttp_proto;

@@ -497,6 +497,12 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             if (-ENOTCONN == rv && !lt->sock_managed) {
                 rv = ttpoe_noc_debug_rx ((u8 *)frh.noc, pif.noc_len);
             }
+            else if (-EPROTO == rv || -EINVAL == rv) {
+                atomic_inc (&ttp_stats.drp_ct);
+                TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, TTP_OP__TTP_NACK);
+                op = TTP_OP__TTP_NACK;
+                goto send;
+            }
             else if (-ENOTCONN == rv) {
                 atomic_inc (&ttp_stats.drp_ct);
                 TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, TTP_OP__TTP_NACK_FULL);

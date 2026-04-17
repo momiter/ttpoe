@@ -55,6 +55,7 @@ extern u8  ttp_nhmac[ETH_ALEN];
 #define TTP_NOC_BUF_SIZE  (1024) /* Size of NOC buffer, including NOC Header + Data */
 #define TTP_NOC_DAT_SIZE  (TTP_NOC_BUF_SIZE - sizeof (struct ttp_ttpoe_noc_hdr))
 #define TTP_NOC_NUM_64B   (TTP_NOC_DAT_SIZE / sizeof (u64))
+#define TTP_SOCK_MSG_MAX  (64 * 1024)
 
 extern struct packet_type ttp_etype_dev;
 
@@ -208,6 +209,11 @@ struct ttp_ttpoe_noc_hdr {
     };
     u64                       xhdr2_u64;
 } __attribute__((packed));
+
+#define TTP_SOCK_FRAG_F_FIRST  BIT(0)
+#define TTP_SOCK_FRAG_F_LAST   BIT(1)
+#define TTP_SOCK_FRAG_META_VER 0x01
+#define TTP_SOCK_FRAG_DATA_MAX (TTP_NOC_DAT_SIZE - sizeof (struct ttp_ttpoe_noc_hdr))
 
 
 struct ttp_ttpoe_noc_dat {
