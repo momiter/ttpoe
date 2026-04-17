@@ -808,7 +808,6 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_ACK (struct ttp_fsm_event *qev)
         }
     }
 
-requ:
     ttp_noc_requ (lt);
     return matched;
 }
@@ -840,7 +839,6 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK (struct ttp_fsm_event *qev)
         }
     }
 
-requ:
     ttp_noc_requ (lt);
     return marked;
 }
