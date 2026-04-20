@@ -895,14 +895,9 @@ static int ttp_release(struct socket *sock)
     tsk = ttp_sk(sk);
     sock->state = SS_DISCONNECTING;
     if (tsk->state == TTP_SS_ESTABLISHED || tsk->state == TTP_SS_PEER_CLOSED) {
-        int rc;
-
         tsk->shutdown_mask |= TTP_SOCK_SHUT_WR;
         ttp_sock_note_local_closed(tsk);
-        rc = ttp_sock_request_close(tsk);
-        if (rc && rc != -EALREADY && rc != -ENOTCONN && rc != -EAGAIN) {
-            return rc;
-        }
+        (void)ttp_sock_request_close(tsk);
     }
     ttp_sock_disconnect(tsk);
     ttp_sock_set_state(tsk, TTP_SS_CLOSED);
