@@ -186,6 +186,10 @@ static bool ttp_fsm_sef__TAG_ALLOC (struct ttp_fsm_event *ev)
         lt = ttp_rbtree_tag_get (ev->kid);
         lt->rx_seq_id = ev->psi.txi_seq; /* init tag-rx-seq-id with OPEN's tx-seq-id */
         lt->state = TTP_ST__OPEN_RECD;
+        rv = ttpoe_socket_accept_prepare (ev->kid);
+        if (rv < 0) {
+            ev->evt = TTP_EV__INQ__NO_TAG;
+        }
     }
     else if (1 == rv) {
         ev->evt = TTP_EV__INQ__NO_TAG;

@@ -12,11 +12,17 @@
 enum ttp_sock_state {
     TTP_SS_INIT = 0,
     TTP_SS_BOUND,
+    TTP_SS_LISTEN,
     TTP_SS_CONNECTING,
     TTP_SS_ESTABLISHED,
+    TTP_SS_LOCAL_CLOSED,
+    TTP_SS_PEER_CLOSED,
     TTP_SS_CLOSED,
     TTP_SS_ERROR,
 };
+
+#define TTP_SOCK_SHUT_RD  BIT(0)
+#define TTP_SOCK_SHUT_WR  BIT(1)
 
 struct ttp_sock {
     struct sock sk;
@@ -28,9 +34,17 @@ struct ttp_sock {
     u64 kid;
     int state;
     int last_error;
+    u8 shutdown_mask;
+    bool close_sent;
     spinlock_t lock;
     wait_queue_head_t waitq;
     struct sk_buff_head rxq;
+    struct list_head listener_link;
+    struct list_head acceptq;
+    struct list_head accept_link;
+    struct ttp_sock *listener;
+    u16 backlog;
+    u16 accept_len;
     struct sk_buff *reasm_skb;
     u32 reasm_total_len;
     u32 reasm_next_off;
@@ -49,6 +63,7 @@ int ttp_create(struct net *net, struct socket *sock, int protocol, int kern);
 int ttp_socket_init(void);
 void ttp_socket_exit(void);
 
+int ttpoe_socket_accept_prepare(u64 kid);
 int ttpoe_socket_payload_rx(u64 kid, const u8 *data, u16 nl);
 void ttpoe_socket_fsm_event(struct ttp_fsm_event *ev, int rs, int ns);
 void ttpoe_socket_link_error(u64 kid, int err);

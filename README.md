@@ -178,6 +178,24 @@ The source code git repo is at https://github.com/teslamotors/ttpoe. The code fo
 
 The repo includes a script with unit tests under the 'tests' directory, using the python unit_test framework. These tests use the 'noc_debug' interface to configure and test a set of basic functionality to serve as a suite of regression tests to run before making any changes to the source code, and when adding enhancements. It is recommended to enhance the tests when new features are added to 'modttpoe'. In additional a packet generation utility called 'trafgen' (which is part of the http://netsniff-ng.org/ tooklit) it used to some inject custom TTP packets to validate the behavior of the TTP state machine functionality.
 
+The repo also includes AF_TTP socket samples under the `tests` directory. These cover client/server `SOCK_SEQPACKET` usage on top of the kernel module, including `listen/accept`, logical-message send/recv, protocol-internal fragmentation/reassembly, and basic poll/nonblocking behavior. They are built separately from the kernel module:
+
+    $ make -C tests
+
+The socket samples use `tests/test.txt` as input and write received data to `tests/recv_test.txt`. A minimal passive/active run looks like:
+
+listener host:
+
+    $ cd tests
+    $ ./ttp_sock_server ens33 0
+
+client host:
+
+    $ cd tests
+    $ ./ttp_sock_client ens33 0 00:00:01
+
+These socket samples complement the legacy `noc_debug` tests; passing the `noc_debug` suite alone does not cover the AF_TTP socket path.
+
 Here is an example TTP session between two hosts: node-01 and node-02:
 
 node-01:

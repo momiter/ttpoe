@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <net/if.h>
 #include <errno.h>
 #include <stdio.h>
@@ -16,7 +17,6 @@
 int main(int argc, char **argv)
 {
     struct sockaddr_ttp local = {0};
-    struct sockaddr_ttp peer = {0};
     char *buffer = NULL;
     struct iovec iov;
     struct msghdr msg;
@@ -26,28 +26,29 @@ int main(int argc, char **argv)
     int truncated = 0;
     int family;
     int fd;
+    int conn_fd = -1;
     FILE *out = NULL;
     ssize_t n;
 
-    if (argc < 4 || argc > 6) {
+    if (argc < 3 || argc > 5) {
         fprintf(stderr,
-                "usage: %s <ifname> <vci> <peer-node> [recv-len] [--dontwait]\n",
+                "usage: %s <ifname> <vci> [recv-len] [--dontwait]\n",
                 argv[0]);
         fprintf(stderr, "note: received data is written to %s\n", TTP_SOCK_OUTPUT_FILE);
         return 2;
     }
 
-    if (argc >= 5) {
-        recv_len = (size_t)strtoul(argv[4], NULL, 0);
+    if (argc >= 4) {
+        recv_len = (size_t)strtoul(argv[3], NULL, 0);
         if (!recv_len || recv_len > TTP_SOCK_MAX_MESSAGE) {
             fprintf(stderr, "invalid recv-len '%s' (must be 1-%d)\n",
-                    argv[4], TTP_SOCK_MAX_MESSAGE);
+                    argv[3], TTP_SOCK_MAX_MESSAGE);
             return 2;
         }
     }
-    if (argc == 6) {
-        if (strcmp(argv[5], "--dontwait") != 0) {
-            fprintf(stderr, "unsupported flag '%s'\n", argv[5]);
+    if (argc == 5) {
+        if (strcmp(argv[4], "--dontwait") != 0) {
+            fprintf(stderr, "unsupported flag '%s'\n", argv[4]);
             return 2;
         }
         recv_flags |= MSG_DONTWAIT;
@@ -75,17 +76,30 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    peer.st_family = family;
-    peer.st_ifindex = local.st_ifindex;
-    peer.st_vci = local.st_vci;
-    if (ttp_parse_node(argv[3], peer.st_node) != 0) {
-        fprintf(stderr, "invalid peer node '%s'\n", argv[3]);
+    if (listen(fd, 1) < 0) {
+        perror("listen");
         close(fd);
         return 1;
     }
 
-    if (connect(fd, (struct sockaddr *)&peer, sizeof(peer)) < 0) {
-        perror("connect");
+    if (recv_flags & MSG_DONTWAIT) {
+        int fl = fcntl(fd, F_GETFL, 0);
+
+        if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) {
+            perror("fcntl(O_NONBLOCK)");
+            close(fd);
+            return 1;
+        }
+    }
+
+    printf("listening over family %d, waiting for connection...\n", family);
+    conn_fd = accept(fd, NULL, NULL);
+    if (conn_fd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            fprintf(stderr, "accept: no pending connection (nonblocking)\n");
+        } else {
+            perror("accept");
+        }
         close(fd);
         return 1;
     }
@@ -93,11 +107,12 @@ int main(int argc, char **argv)
     buffer = malloc(recv_len);
     if (!buffer) {
         perror("malloc(buffer)");
+        close(conn_fd);
         close(fd);
         return 1;
     }
 
-    printf("connected over family %d, waiting for payload...\n", family);
+    printf("accepted connection over family %d, waiting for payload...\n", family);
 
     memset(&msg, 0, sizeof(msg));
     iov.iov_base = buffer;
@@ -105,7 +120,7 @@ int main(int argc, char **argv)
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
 
-    n = recvmsg(fd, &msg, recv_flags);
+    n = recvmsg(conn_fd, &msg, recv_flags);
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             fprintf(stderr, "recvmsg: no data available (nonblocking)\n");
@@ -113,6 +128,7 @@ int main(int argc, char **argv)
             perror("recvmsg");
         }
         free(buffer);
+        close(conn_fd);
         close(fd);
         return 1;
     }
@@ -121,6 +137,7 @@ int main(int argc, char **argv)
     if (!out) {
         perror("fopen(recv_test.txt)");
         free(buffer);
+        close(conn_fd);
         close(fd);
         return 1;
     }
@@ -131,6 +148,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "failed to write all data to %s\n", TTP_SOCK_OUTPUT_FILE);
         fclose(out);
         free(buffer);
+        close(conn_fd);
         close(fd);
         return 1;
     }
@@ -139,6 +157,7 @@ int main(int argc, char **argv)
 
     printf("received %zd bytes over family %d (copied=%zu trunc=%s), wrote %s\n",
            n, family, display_len, truncated ? "yes" : "no", TTP_SOCK_OUTPUT_FILE);
+    close(conn_fd);
     close(fd);
     return 0;
 }
