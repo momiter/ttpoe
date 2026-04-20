@@ -47,6 +47,8 @@ static void ttp_sock_init_common(struct ttp_sock *tsk);
 static void ttp_sock_wake(struct ttp_sock *tsk);
 static int ttp_sock_request_close(struct ttp_sock *tsk);
 static void ttp_sock_disconnect(struct ttp_sock *tsk);
+static int ttp_sock_build_target(struct ttp_sock *tsk, struct ttpoe_host_info *tg);
+static void ttp_sock_put(struct ttp_sock *tsk);
 
 static void ttp_sock_wake(struct ttp_sock *tsk)
 {
