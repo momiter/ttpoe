@@ -508,7 +508,7 @@ static int ttp_sock_shutdown(struct socket *sock, int flags)
 
     if (how == SHUT_WR || how == SHUT_RDWR) {
         rc = ttp_sock_request_close(tsk);
-        if (rc && rc != -EALREADY && rc != -ENOTCONN) {
+        if (rc && rc != -EALREADY && rc != -ENOTCONN && rc != -EAGAIN) {
             return rc;
         }
     }
@@ -655,6 +655,7 @@ static void ttp_sock_set_error(struct ttp_sock *tsk, int err)
 static int ttp_sock_request_close(struct ttp_sock *tsk)
 {
     struct ttpoe_host_info target;
+    struct ttp_link_tag *lt;
     unsigned long flags;
     int rc = 0;
     bool do_close = false;
@@ -674,6 +675,14 @@ static int ttp_sock_request_close(struct ttp_sock *tsk)
     tsk->close_sent = true;
     do_close = true;
     spin_unlock_irqrestore(&tsk->lock, flags);
+
+    lt = ttp_rbtree_tag_get(tsk->kid);
+    if (lt && ttp_tag_has_pending_noc(lt)) {
+        spin_lock_irqsave(&tsk->lock, flags);
+        tsk->close_sent = false;
+        spin_unlock_irqrestore(&tsk->lock, flags);
+        return -EAGAIN;
+    }
 
     if (do_close) {
         rc = ttpoe_submit_event(NULL, NULL, 0, TTP_EV__TXQ__TTP_CLOSE, &target);
@@ -805,7 +814,11 @@ static void ttp_sock_disconnect(struct ttp_sock *tsk)
 
     if (kid) {
         lt = ttp_rbtree_tag_get(kid);
-        if (lt && state == TTP_SS_ESTABLISHED && ttp_tag_has_pending_noc(lt)) {
+        if (lt &&
+            (state == TTP_SS_ESTABLISHED ||
+             state == TTP_SS_LOCAL_CLOSED ||
+             state == TTP_SS_PEER_CLOSED) &&
+            ttp_tag_has_pending_noc(lt)) {
             ttp_tag_mark_orphaned(lt);
             defer_reset = true;
         }
@@ -868,9 +881,14 @@ static int ttp_release(struct socket *sock)
     tsk = ttp_sk(sk);
     sock->state = SS_DISCONNECTING;
     if (tsk->state == TTP_SS_ESTABLISHED || tsk->state == TTP_SS_PEER_CLOSED) {
+        int rc;
+
         tsk->shutdown_mask |= TTP_SOCK_SHUT_WR;
         ttp_sock_note_local_closed(tsk);
-        (void)ttp_sock_request_close(tsk);
+        rc = ttp_sock_request_close(tsk);
+        if (rc && rc != -EALREADY && rc != -ENOTCONN && rc != -EAGAIN) {
+            return rc;
+        }
     }
     ttp_sock_disconnect(tsk);
     ttp_sock_set_state(tsk, TTP_SS_CLOSED);
