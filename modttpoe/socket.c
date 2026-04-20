@@ -800,16 +800,29 @@ static void ttp_sock_disconnect(struct ttp_sock *tsk)
     u64 kid;
     int state;
     struct ttp_link_tag *lt;
+    struct ttp_sock *listener = NULL;
     bool defer_reset = false;
 
     spin_lock_irqsave(&tsk->lock, flags);
     kid = tsk->kid;
     state = tsk->state;
+    listener = tsk->listener;
     spin_unlock_irqrestore(&tsk->lock, flags);
 
-    if (tsk->state == TTP_SS_LISTEN) {
+    if (!list_empty(&tsk->listener_link) || tsk->state == TTP_SS_LISTEN) {
         ttp_listener_unregister(tsk);
         ttp_listener_cleanup_acceptq(tsk);
+    }
+
+    if (listener && !list_empty(&tsk->accept_link)) {
+        spin_lock_irqsave(&listener->lock, flags);
+        if (!list_empty(&tsk->accept_link)) {
+            list_del_init(&tsk->accept_link);
+            if (listener->accept_len) {
+                listener->accept_len--;
+            }
+        }
+        spin_unlock_irqrestore(&listener->lock, flags);
     }
 
     if (kid) {
@@ -842,6 +855,7 @@ static void ttp_sock_disconnect(struct ttp_sock *tsk)
     tsk->last_error = 0;
     tsk->shutdown_mask = 0;
     tsk->close_sent = false;
+    tsk->listener = NULL;
     tsk->state = tsk->ifindex ? TTP_SS_BOUND : TTP_SS_INIT;
     tsk->sk.sk_err = 0;
     spin_unlock_irqrestore(&tsk->lock, flags);
