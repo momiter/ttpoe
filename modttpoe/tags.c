@@ -1405,7 +1405,12 @@ void ttp_noc_enqu (struct ttp_fsm_event *ev)
         ttp_stats.nocq++;
     });
 
-    schedule_work (&lt->wkq);
+    /*
+     * Enqueueing into nocq is not enough on its own. The tag worker drains FSM
+     * queues, but it does not promote nocq entries into TXQ. Kick the TX-window
+     * scheduler immediately so newly queued payloads actually get sent.
+     */
+    ttp_noc_requ (lt);
 
     TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_ENQ, TTP_OP__TTP_PAYLOAD);
     TTP_DB1 ("%s: enqueue %s len:%d tx:%d mark:%s\n", __FUNCTION__,

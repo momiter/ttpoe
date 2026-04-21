@@ -1556,12 +1556,6 @@ void ttpoe_socket_fsm_event(struct ttp_fsm_event *ev, int rs, int ns)
         }
         ttp_sock_unbind_tag(tsk);
     }
-    if (ns == TTP_ST__CLOSED &&
-        READ_ONCE(tsk->state) != TTP_SS_CLOSED &&
-        READ_ONCE(tsk->state) != TTP_SS_ERROR) {
-        ttp_sock_note_peer_closed(tsk);
-    }
-
     if (READ_ONCE(tsk->close_requested) &&
         READ_ONCE(tsk->state) == TTP_SS_LOCAL_CLOSED &&
         !READ_ONCE(tsk->close_sent)) {
