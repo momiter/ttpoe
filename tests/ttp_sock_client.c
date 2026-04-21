@@ -48,26 +48,37 @@ int main(int argc, char **argv)
     int family;
     int fd;
     int linger_ms = -1;
+    int do_shutdown_wr = 0;
     FILE *fp = NULL;
     long file_size;
     ssize_t n;
+    int i;
 
-    if (argc != 4 && argc != 5) {
+    if (argc < 4 || argc > 6) {
         fprintf(stderr,
-                "usage: %s <ifname> <vci> <peer-node> [linger-ms]\n",
+                "usage: %s <ifname> <vci> <peer-node> [linger-ms] [--shutdown-wr]\n",
                 argv[0]);
         fprintf(stderr, "note: send data is read from %s\n", TTP_SOCK_INPUT_FILE);
         return 2;
     }
 
-    if (argc == 5) {
-        char *end = NULL;
-
-        linger_ms = (int)strtol(argv[4], &end, 0);
-        if (!end || *end != '\0' || linger_ms < 0) {
-            fprintf(stderr, "invalid linger-ms '%s'\n", argv[4]);
-            return 2;
+    for (i = 4; i < argc; i++) {
+        if (strcmp(argv[i], "--shutdown-wr") == 0) {
+            do_shutdown_wr = 1;
+            continue;
         }
+        if (linger_ms < 0) {
+            char *end = NULL;
+
+            linger_ms = (int)strtol(argv[i], &end, 0);
+            if (!end || *end != '\0' || linger_ms < 0) {
+                fprintf(stderr, "invalid linger-ms '%s'\n", argv[i]);
+                return 2;
+            }
+            continue;
+        }
+        fprintf(stderr, "unsupported argument '%s'\n", argv[i]);
+        return 2;
     }
 
     fp = fopen(TTP_SOCK_INPUT_FILE, "rb");
@@ -161,6 +172,27 @@ int main(int argc, char **argv)
     free(payload);
     printf("sent %ld bytes from %s over family %d\n",
            file_size, TTP_SOCK_INPUT_FILE, family);
+    if (do_shutdown_wr) {
+        char byte;
+
+        if (shutdown(fd, SHUT_WR) < 0) {
+            perror("shutdown(SHUT_WR)");
+            close(fd);
+            return 1;
+        }
+        n = recv(fd, &byte, sizeof(byte), 0);
+        if (n < 0) {
+            perror("recv(after shutdown)");
+            close(fd);
+            return 1;
+        }
+        if (n != 0) {
+            fprintf(stderr, "expected EOF after shutdown, got %zd bytes\n", n);
+            close(fd);
+            return 1;
+        }
+        printf("shutdown(SHUT_WR) completed, peer EOF observed\n");
+    }
     if (linger_ms >= 0) {
         printf("waiting %d ms before close\n", linger_ms);
         (void)poll(NULL, 0, linger_ms);

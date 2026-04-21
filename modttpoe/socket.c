@@ -58,6 +58,11 @@ static void ttp_sock_wake(struct ttp_sock *tsk)
     }
 }
 
+static bool ttp_sock_is_detached(const struct ttp_sock *tsk)
+{
+    return sock_flag(&tsk->sk, SOCK_DEAD) || !tsk->sk.sk_socket;
+}
+
 static void ttp_sock_init_common(struct ttp_sock *tsk)
 {
     memset(&tsk->target, 0, sizeof(tsk->target));
@@ -69,6 +74,7 @@ static void ttp_sock_init_common(struct ttp_sock *tsk)
     tsk->state = TTP_SS_INIT;
     tsk->last_error = 0;
     tsk->shutdown_mask = 0;
+    tsk->close_requested = false;
     tsk->close_sent = false;
     spin_lock_init(&tsk->lock);
     init_waitqueue_head(&tsk->waitq);
@@ -505,6 +511,7 @@ static int ttp_sock_shutdown(struct socket *sock, int flags)
     }
     if (how == SHUT_WR || how == SHUT_RDWR) {
         tsk->shutdown_mask |= TTP_SOCK_SHUT_WR;
+        tsk->close_requested = true;
         if (tsk->state == TTP_SS_ESTABLISHED) {
             tsk->state = TTP_SS_LOCAL_CLOSED;
         } else if (tsk->state == TTP_SS_PEER_CLOSED) {
@@ -520,10 +527,7 @@ static int ttp_sock_shutdown(struct socket *sock, int flags)
     }
 
     if (how == SHUT_WR || how == SHUT_RDWR) {
-        rc = ttp_sock_request_close(tsk);
-        if (rc && rc != -EALREADY && rc != -ENOTCONN && rc != -EAGAIN) {
-            return rc;
-        }
+        ttp_sock_maybe_send_close(tsk);
     }
 
     if (wake) {
@@ -681,13 +685,15 @@ static int ttp_sock_request_close(struct ttp_sock *tsk)
     bool do_close = false;
 
     spin_lock_irqsave(&tsk->lock, flags);
+    if (!tsk->close_requested) {
+        spin_unlock_irqrestore(&tsk->lock, flags);
+        return 0;
+    }
     if (tsk->close_sent) {
         spin_unlock_irqrestore(&tsk->lock, flags);
         return -EALREADY;
     }
-    if (!tsk->kid || (tsk->state != TTP_SS_ESTABLISHED &&
-                      tsk->state != TTP_SS_LOCAL_CLOSED &&
-                      tsk->state != TTP_SS_PEER_CLOSED)) {
+    if (!tsk->kid || tsk->state != TTP_SS_LOCAL_CLOSED) {
         spin_unlock_irqrestore(&tsk->lock, flags);
         return -ENOTCONN;
     }
@@ -742,6 +748,7 @@ static void ttp_sock_note_local_closed(struct ttp_sock *tsk)
     unsigned long flags;
 
     spin_lock_irqsave(&tsk->lock, flags);
+    tsk->close_requested = true;
     if (tsk->state == TTP_SS_ESTABLISHED) {
         tsk->state = TTP_SS_LOCAL_CLOSED;
     } else if (tsk->state == TTP_SS_PEER_CLOSED) {
@@ -749,6 +756,34 @@ static void ttp_sock_note_local_closed(struct ttp_sock *tsk)
     }
     spin_unlock_irqrestore(&tsk->lock, flags);
     ttp_sock_wake(tsk);
+}
+
+static void ttp_sock_maybe_send_close(struct ttp_sock *tsk)
+{
+    int rc;
+
+    rc = ttp_sock_request_close(tsk);
+    if (rc == -EAGAIN || rc == -EALREADY || rc == -ENOTCONN) {
+        return;
+    }
+    if (rc < 0) {
+        ttp_sock_set_error(tsk, -rc);
+        ttp_sock_unbind_tag(tsk);
+    }
+}
+
+static void ttp_sock_maybe_finalize_detached(struct ttp_sock *tsk)
+{
+    int state;
+
+    if (!ttp_sock_is_detached(tsk)) {
+        return;
+    }
+
+    state = READ_ONCE(tsk->state);
+    if (state == TTP_SS_CLOSED || state == TTP_SS_PEER_CLOSED || state == TTP_SS_ERROR) {
+        ttp_sock_disconnect(tsk);
+    }
 }
 
 static int ttp_sock_bind_tag(struct ttp_sock *tsk, u64 kid)
@@ -874,6 +909,7 @@ static void ttp_sock_disconnect(struct ttp_sock *tsk)
     memset(tsk->peer_node, 0, sizeof(tsk->peer_node));
     tsk->last_error = 0;
     tsk->shutdown_mask = 0;
+    tsk->close_requested = false;
     tsk->close_sent = false;
     tsk->listener = NULL;
     tsk->state = tsk->ifindex ? TTP_SS_BOUND : TTP_SS_INIT;
@@ -907,6 +943,7 @@ static int ttp_release(struct socket *sock)
 {
     struct sock *sk = sock->sk;
     struct ttp_sock *tsk;
+    bool defer_close = false;
 
     if (!sk) {
         return 0;
@@ -914,10 +951,25 @@ static int ttp_release(struct socket *sock)
 
     tsk = ttp_sk(sk);
     sock->state = SS_DISCONNECTING;
-    if (tsk->state == TTP_SS_ESTABLISHED || tsk->state == TTP_SS_PEER_CLOSED) {
+    if (tsk->state == TTP_SS_ESTABLISHED ||
+        tsk->state == TTP_SS_PEER_CLOSED ||
+        tsk->state == TTP_SS_LOCAL_CLOSED) {
         tsk->shutdown_mask |= TTP_SOCK_SHUT_WR;
-        ttp_sock_note_local_closed(tsk);
-        (void)ttp_sock_request_close(tsk);
+        if (tsk->state != TTP_SS_LOCAL_CLOSED) {
+            ttp_sock_note_local_closed(tsk);
+        }
+        ttp_sock_maybe_send_close(tsk);
+    }
+
+    if (tsk->state == TTP_SS_LOCAL_CLOSED && tsk->kid) {
+        defer_close = true;
+    }
+
+    if (defer_close) {
+        sock_orphan(sk);
+        sock->sk = NULL;
+        sock_put(sk);
+        return 0;
     }
     ttp_sock_disconnect(tsk);
     ttp_sock_set_state(tsk, TTP_SS_CLOSED);
@@ -974,6 +1026,7 @@ static int ttp_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
     tsk->vci = addr->st_vci;
     tsk->last_error = 0;
     tsk->shutdown_mask = 0;
+    tsk->close_requested = false;
     tsk->close_sent = false;
     tsk->state = TTP_SS_BOUND;
     spin_unlock_irqrestore(&tsk->lock, flags);
@@ -1482,6 +1535,7 @@ void ttpoe_socket_fsm_event(struct ttp_fsm_event *ev, int rs, int ns)
         break;
     case TTP_EV__RXQ__TTP_CLOSE_ACK:
         if (state == TTP_SS_LOCAL_CLOSED || state == TTP_SS_PEER_CLOSED) {
+            ttp_sock_unbind_tag(tsk);
             ttp_sock_set_state(tsk, TTP_SS_CLOSED);
         }
         break;
@@ -1506,6 +1560,14 @@ void ttpoe_socket_fsm_event(struct ttp_fsm_event *ev, int rs, int ns)
         READ_ONCE(tsk->state) != TTP_SS_ERROR) {
         ttp_sock_note_peer_closed(tsk);
     }
+
+    if (READ_ONCE(tsk->close_requested) &&
+        READ_ONCE(tsk->state) == TTP_SS_LOCAL_CLOSED &&
+        !READ_ONCE(tsk->close_sent)) {
+        ttp_sock_maybe_send_close(tsk);
+    }
+
+    ttp_sock_maybe_finalize_detached(tsk);
 
     ttp_sock_wake(tsk);
     ttp_sock_put(tsk);

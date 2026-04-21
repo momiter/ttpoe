@@ -24,34 +24,42 @@ int main(int argc, char **argv)
     size_t display_len;
     int recv_flags = 0;
     int truncated = 0;
+    int expect_eof = 0;
     int family;
     int fd;
     int conn_fd = -1;
     FILE *out = NULL;
     ssize_t n;
+    int i;
 
-    if (argc < 3 || argc > 5) {
+    if (argc < 3 || argc > 6) {
         fprintf(stderr,
-                "usage: %s <ifname> <vci> [recv-len] [--dontwait]\n",
+                "usage: %s <ifname> <vci> [recv-len] [--dontwait] [--expect-eof]\n",
                 argv[0]);
         fprintf(stderr, "note: received data is written to %s\n", TTP_SOCK_OUTPUT_FILE);
         return 2;
     }
 
-    if (argc >= 4) {
-        recv_len = (size_t)strtoul(argv[3], NULL, 0);
-        if (!recv_len || recv_len > TTP_SOCK_MAX_MESSAGE) {
-            fprintf(stderr, "invalid recv-len '%s' (must be 1-%d)\n",
-                    argv[3], TTP_SOCK_MAX_MESSAGE);
-            return 2;
+    for (i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--dontwait") == 0) {
+            recv_flags |= MSG_DONTWAIT;
+            continue;
         }
-    }
-    if (argc == 5) {
-        if (strcmp(argv[4], "--dontwait") != 0) {
-            fprintf(stderr, "unsupported flag '%s'\n", argv[4]);
-            return 2;
+        if (strcmp(argv[i], "--expect-eof") == 0) {
+            expect_eof = 1;
+            continue;
         }
-        recv_flags |= MSG_DONTWAIT;
+        if (recv_len == TTP_SOCK_MAX_MESSAGE) {
+            recv_len = (size_t)strtoul(argv[i], NULL, 0);
+            if (!recv_len || recv_len > TTP_SOCK_MAX_MESSAGE) {
+                fprintf(stderr, "invalid recv-len '%s' (must be 1-%d)\n",
+                        argv[i], TTP_SOCK_MAX_MESSAGE);
+                return 2;
+            }
+            continue;
+        }
+        fprintf(stderr, "unsupported argument '%s'\n", argv[i]);
+        return 2;
     }
 
     family = ttp_socket_family_detect();
@@ -153,10 +161,28 @@ int main(int argc, char **argv)
         return 1;
     }
     fclose(out);
-    free(buffer);
 
     printf("received %zd bytes over family %d (copied=%zu trunc=%s), wrote %s\n",
            n, family, display_len, truncated ? "yes" : "no", TTP_SOCK_OUTPUT_FILE);
+
+    if (expect_eof) {
+        n = recvmsg(conn_fd, &msg, 0);
+        if (n < 0) {
+            perror("recvmsg(expect eof)");
+            close(conn_fd);
+            close(fd);
+            return 1;
+        }
+        if (n != 0) {
+            fprintf(stderr, "expected EOF after payload, got %zd bytes\n", n);
+            close(conn_fd);
+            close(fd);
+            return 1;
+        }
+        printf("peer EOF observed after payload\n");
+    }
+
+    free(buffer);
     close(conn_fd);
     close(fd);
     return 0;

@@ -194,6 +194,18 @@ client host:
     $ cd tests
     $ ./ttp_sock_client ens33 0 00:00:01
 
+To verify the protocol close handshake (`TTP_CLOSE` / `TTP_CLOSE_ACK`) through the socket interface:
+
+listener host:
+
+    $ cd tests
+    $ ./ttp_sock_server ens33 0 --expect-eof
+
+client host:
+
+    $ cd tests
+    $ ./ttp_sock_client ens33 0 00:00:01 --shutdown-wr
+
 These socket samples complement the legacy `noc_debug` tests; passing the `noc_debug` suite alone does not cover the AF_TTP socket path.
 
 Here is an example TTP session between two hosts: node-01 and node-02:

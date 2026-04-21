@@ -5,17 +5,21 @@ usage() {
     cat <<'EOF'
 usage:
   ./ttp_sock_smoke.sh normal-recv   <ifname> <vci>
+  ./ttp_sock_smoke.sh eof-recv      <ifname> <vci>
   ./ttp_sock_smoke.sh trunc-recv    <ifname> <vci> <recv-len>
   ./ttp_sock_smoke.sh dontwait-recv <ifname> <vci> [recv-len]
   ./ttp_sock_smoke.sh send          <ifname> <vci> <peer-node>
+  ./ttp_sock_smoke.sh send-shutdown <ifname> <vci> <peer-node>
   ./ttp_sock_smoke.sh send-exit     <ifname> <vci> <peer-node>
   ./ttp_sock_smoke.sh send-wait     <ifname> <vci> <peer-node> <linger-ms>
 
 examples:
   ./ttp_sock_smoke.sh normal-recv vleth 0
+  ./ttp_sock_smoke.sh eof-recv vleth 0
   ./ttp_sock_smoke.sh trunc-recv  vleth 0 8
   ./ttp_sock_smoke.sh dontwait-recv vleth 0
   ./ttp_sock_smoke.sh send vleth 0 00:00:01
+  ./ttp_sock_smoke.sh send-shutdown vleth 0 00:00:01
   ./ttp_sock_smoke.sh send-exit vleth 0 00:00:01
   ./ttp_sock_smoke.sh send-wait vleth 0 00:00:01 500
 
@@ -41,6 +45,9 @@ case "$mode" in
     normal-recv)
         exec ./ttp_sock_server "$@"
         ;;
+    eof-recv)
+        exec ./ttp_sock_server "$@" --expect-eof
+        ;;
     trunc-recv)
         exec ./ttp_sock_server "$@"
         ;;
@@ -52,6 +59,9 @@ case "$mode" in
         ;;
     send)
         exec ./ttp_sock_client "$@"
+        ;;
+    send-shutdown)
+        exec ./ttp_sock_client "$@" --shutdown-wr
         ;;
     send-exit)
         exec ./ttp_sock_client "$@"
