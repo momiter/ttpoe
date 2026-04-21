@@ -195,6 +195,12 @@ static int ttp_listener_enqueue_child(struct ttp_sock *listener, struct ttp_sock
         (listener->backlog && listener->accept_len >= listener->backlog)) {
         rc = -ENOBUFS;
     } else {
+        /*
+         * The listener accept queue owns an explicit child-socket reference.
+         * This is released either by accept() after sock_graft() succeeds, or
+         * by listener cleanup when the queued child is discarded.
+         */
+        sock_hold(&child->sk);
         list_add_tail(&child->accept_link, &listener->acceptq);
         listener->accept_len++;
     }
@@ -598,6 +604,13 @@ static int ttp_accept(struct socket *sock, struct socket *newsock, int flags, bo
 
     newsock->ops = &ttp_proto_ops;
     sock_graft(&child->sk, newsock);
+    /*
+     * The child skb was created and kept alive while queued on the listener's
+     * acceptq. Once grafted onto the accepted socket, the new socket owns that
+     * lifetime; drop the queue/creator reference so close() can reach
+     * ttp_sock_destruct().
+     */
+    sock_put(&child->sk);
     newsock->state = SS_CONNECTED;
     TTP_DB1("%s: listener:%px child sk:%px newsock:%px state:%d ref:%d\n",
             __FUNCTION__, listener, &child->sk, newsock, child->state,
