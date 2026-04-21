@@ -800,6 +800,9 @@ static void ttp_sock_unbind_tag(struct ttp_sock *tsk)
         });
     }
 
+    TTP_DB1("%s: sk:%px kid:0x%016llx lt:%px mapped:%d\n",
+            __FUNCTION__, &tsk->sk, cpu_to_be64(kid), lt, mapped);
+
     if (mapped) {
         sock_put(&tsk->sk);
     }
