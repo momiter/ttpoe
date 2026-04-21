@@ -46,7 +46,9 @@ static void ttp_sock_destruct(struct sock *sk);
 static void ttp_sock_init_common(struct ttp_sock *tsk);
 static void ttp_sock_wake(struct ttp_sock *tsk);
 static int ttp_sock_request_close(struct ttp_sock *tsk);
+static void ttp_sock_maybe_send_close(struct ttp_sock *tsk);
 static void ttp_sock_disconnect(struct ttp_sock *tsk);
+static void ttp_sock_maybe_finalize_detached(struct ttp_sock *tsk);
 static int ttp_sock_build_target(struct ttp_sock *tsk, struct ttpoe_host_info *tg);
 static void ttp_sock_put(struct ttp_sock *tsk);
 
@@ -495,7 +497,6 @@ static int ttp_sock_shutdown(struct socket *sock, int flags)
     unsigned long irqflags;
     int how = flags & SHUTDOWN_MASK;
     bool wake = false;
-    int rc = 0;
 
     if (how < SHUT_RD || how > SHUT_RDWR) {
         return -EINVAL;
