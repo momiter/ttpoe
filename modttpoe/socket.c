@@ -147,6 +147,8 @@ static struct ttp_sock *ttp_sock_alloc_child(struct ttp_sock *listener)
     child->vci = listener->vci;
     memcpy(child->local_node, listener->local_node, sizeof(child->local_node));
     child->state = TTP_SS_ESTABLISHED;
+    TTP_DB1("%s: child sk:%px listener:%px ifindex:%d vci:%u\n",
+            __FUNCTION__, &child->sk, listener, child->ifindex, child->vci);
     return child;
 }
 
@@ -192,6 +194,8 @@ static int ttp_listener_enqueue_child(struct ttp_sock *listener, struct ttp_sock
     spin_unlock_irqrestore(&listener->lock, flags);
 
     if (!rc) {
+        TTP_DB1("%s: listener:%px child:%px accept_len:%u backlog:%u\n",
+                __FUNCTION__, listener, child, listener->accept_len, listener->backlog);
         ttp_sock_wake(listener);
     }
     return rc;
@@ -212,6 +216,11 @@ static struct ttp_sock *ttp_listener_dequeue_child(struct ttp_sock *listener)
         child->listener = NULL;
     }
     spin_unlock_irqrestore(&listener->lock, flags);
+
+    if (child) {
+        TTP_DB1("%s: listener:%px child:%px accept_len:%u\n",
+                __FUNCTION__, listener, child, listener->accept_len);
+    }
 
     return child;
 }
@@ -581,6 +590,8 @@ static int ttp_accept(struct socket *sock, struct socket *newsock, int flags, bo
     newsock->ops = &ttp_proto_ops;
     sock_graft(&child->sk, newsock);
     newsock->state = SS_CONNECTED;
+    TTP_DB1("%s: listener:%px child sk:%px newsock:%px state:%d\n",
+            __FUNCTION__, listener, &child->sk, newsock, child->state);
     return 0;
 }
 
@@ -809,6 +820,10 @@ static void ttp_sock_disconnect(struct ttp_sock *tsk)
     listener = tsk->listener;
     spin_unlock_irqrestore(&tsk->lock, flags);
 
+    TTP_DB1("%s: sk:%px kid:0x%016llx state:%d listener:%px lnk:%d acc:%d\n",
+            __FUNCTION__, &tsk->sk, cpu_to_be64(kid), state, listener,
+            !list_empty(&tsk->listener_link), !list_empty(&tsk->accept_link));
+
     if (!list_empty(&tsk->listener_link) || tsk->state == TTP_SS_LISTEN) {
         ttp_listener_unregister(tsk);
         ttp_listener_cleanup_acceptq(tsk);
@@ -893,6 +908,9 @@ static int ttp_release(struct socket *sock)
     }
 
     tsk = ttp_sk(sk);
+    TTP_DB1("%s: sock:%px sk:%px kid:0x%016llx state:%d listener:%px lnk:%d acc:%d\n",
+            __FUNCTION__, sock, sk, cpu_to_be64(tsk->kid), tsk->state, tsk->listener,
+            !list_empty(&tsk->listener_link), !list_empty(&tsk->accept_link));
     sock->state = SS_DISCONNECTING;
     if (tsk->state == TTP_SS_ESTABLISHED || tsk->state == TTP_SS_PEER_CLOSED) {
         tsk->shutdown_mask |= TTP_SOCK_SHUT_WR;
@@ -1316,6 +1334,10 @@ static int ttp_recvmsg(struct socket *sock, struct msghdr *msg, size_t total_len
 static void ttp_sock_destruct(struct sock *sk)
 {
     struct ttp_sock *tsk = ttp_sk(sk);
+
+    TTP_DB1("%s: sk:%px kid:0x%016llx state:%d listener:%px lnk:%d acc:%d\n",
+            __FUNCTION__, sk, cpu_to_be64(tsk->kid), tsk->state, tsk->listener,
+            !list_empty(&tsk->listener_link), !list_empty(&tsk->accept_link));
 
     skb_queue_purge(&tsk->rxq);
     ttp_sock_reasm_reset(tsk);
