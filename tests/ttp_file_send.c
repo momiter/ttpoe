@@ -170,6 +170,24 @@ int main(int argc, char **argv)
         goto out;
     }
 
+    for (;;) {
+        unsigned char byte;
+        ssize_t got = recv(fd, &byte, 1, 0);
+
+        if (got == 0) {
+            break;
+        }
+        if (got > 0) {
+            fprintf(stderr, "unexpected data received while waiting for peer EOF\n");
+            goto out;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        perror("recv(expect eof)");
+        goto out;
+    }
+
     printf("sent %llu bytes from %s in chunks of %zu bytes\n",
            (unsigned long long)sent, argv[4], chunk_size);
     rc = 0;
