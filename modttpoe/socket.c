@@ -850,6 +850,23 @@ static void ttp_sock_unbind_tag(struct ttp_sock *tsk)
     }
 }
 
+void ttpoe_socket_tag_drop(struct ttp_sock *tsk, u64 kid)
+{
+    unsigned long flags;
+
+    if (!tsk) {
+        return;
+    }
+
+    spin_lock_irqsave(&tsk->lock, flags);
+    if (tsk->kid == kid) {
+        tsk->kid = 0;
+    }
+    spin_unlock_irqrestore(&tsk->lock, flags);
+
+    sock_put(&tsk->sk);
+}
+
 static void ttp_sock_disconnect(struct ttp_sock *tsk)
 {
     unsigned long flags;

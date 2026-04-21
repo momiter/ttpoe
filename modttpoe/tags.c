@@ -484,6 +484,12 @@ static enum ttp_states_enum ttp_tag_get_state (u64 kid)
 TTP_NOINLINE
 void ttp_tag_reset (struct ttp_link_tag *lt)
 {
+    struct ttp_sock *sock;
+    u64 kid;
+
+    sock = lt->sock;
+    kid = lt->_rkid;
+
     lt->valid       = 0;
     lt->state       = TTP_ST__CLOSED;
     lt->sock        = NULL;
@@ -508,6 +514,10 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->try = 0;        /* tx-retry count */
 
     lt->_rkid = 0ULL;   /* clear whole raw key id */
+
+    if (sock) {
+        ttpoe_socket_tag_drop(sock, kid);
+    }
 }
 
 void ttp_tag_force_reset(struct ttp_link_tag *lt)

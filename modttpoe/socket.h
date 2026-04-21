@@ -68,5 +68,6 @@ int ttpoe_socket_accept_prepare(u64 kid);
 int ttpoe_socket_payload_rx(u64 kid, const u8 *data, u16 nl);
 void ttpoe_socket_fsm_event(struct ttp_fsm_event *ev, int rs, int ns);
 void ttpoe_socket_link_error(u64 kid, int err);
+void ttpoe_socket_tag_drop(struct ttp_sock *tsk, u64 kid);
 
 #endif
