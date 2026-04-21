@@ -143,6 +143,13 @@ static struct ttp_sock *ttp_sock_alloc_child(struct ttp_sock *listener)
         return NULL;
     }
 
+    /*
+     * Passive accepted children are real sockets too. They need the standard
+     * socket-layer initialization even before being grafted onto the userspace
+     * accepted socket; otherwise sk_refcnt and related socket bookkeeping stay
+     * uninitialized, which breaks release/destruct lifetime management.
+     */
+    sock_init_data(NULL, sk);
     sk->sk_family = ttp_socket_family;
     sk->sk_protocol = 0;
     sk->sk_destruct = ttp_sock_destruct;
