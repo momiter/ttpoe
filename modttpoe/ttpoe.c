@@ -372,6 +372,9 @@ int ttp_skb_dequ (void)
         TTP_DBG ("%s: INVALID vc-id:%d\n", __FUNCTION__, frh.ttp->conn_vc);
         goto drop;
     }
+    /* Current SW implementation does not implement spec-level VC request paths
+     * (REQ_HI/REQ_LO). Valid VC IDs are accepted and handled with the existing
+     * payload-oriented path only. */
     if (!ttp_evt_pget (&ev)) {
         goto drop;
     }

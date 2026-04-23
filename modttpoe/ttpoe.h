@@ -52,6 +52,31 @@ extern int ttp_ipv4_encap;
 extern int ttp_tx_window;
 extern u8  ttp_nhmac[ETH_ALEN];
 
+static inline bool ttp_seq_before_u32 (u32 lhs, u32 rhs)
+{
+    return (s32)(lhs - rhs) < 0;
+}
+
+static inline bool ttp_seq_after_u32 (u32 lhs, u32 rhs)
+{
+    return (s32)(lhs - rhs) > 0;
+}
+
+static inline bool ttp_seq_leq_u32 (u32 lhs, u32 rhs)
+{
+    return !ttp_seq_after_u32 (lhs, rhs);
+}
+
+static inline bool ttp_seq_geq_u32 (u32 lhs, u32 rhs)
+{
+    return !ttp_seq_before_u32 (lhs, rhs);
+}
+
+static inline u32 ttp_seq_next_u32 (u32 seq)
+{
+    return seq + 1;
+}
+
 #define TTP_NOC_BUF_SIZE  (1024) /* Size of NOC buffer, including NOC Header + Data */
 #define TTP_NOC_DAT_SIZE  (TTP_NOC_BUF_SIZE - sizeof (struct ttp_ttpoe_noc_hdr))
 #define TTP_NOC_NUM_64B   (TTP_NOC_DAT_SIZE / sizeof (u64))
@@ -170,7 +195,7 @@ enum ttp_extn_types_enum {
     TTP_ET__BASE             = 0x00, /* implicit types */
     TTP_ET__PROTOCOL         = 0x00, /* implicit types */
     TTP_ET__DATA_VC          = 0x00, /* implicit types */
-    TTP_ET__REQUEST_VC       = 0x00, /* implicit types */
+    TTP_ET__REQUEST_VC       = 0x00, /* implicit types, SW request-path unsupported */
 
     TTP_ET__EXPLICIT_ADDR    = 0x00,
 

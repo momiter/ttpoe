@@ -160,12 +160,27 @@ static bool ttp_fsm_sef__EMPTY_NOCQ (struct ttp_fsm_event *ev)
     }
 
     lt->state = TTP_ST__CLOSE_SENT;
-
-    /* empty the noc queue */
-    while (ttp_noc_dequ (lt)) {
-        ;
+    if (!lt->close_tx_id) {
+        lt->close_tx_id = lt->tx_seq_id;
+        lt->close_rx_id = lt->rx_seq_id;
+        lt->peer_close_tx_id = 0;
+        lt->close_ack_pending = false;
+        lt->close_ack_sent = false;
     }
     return true;
+}
+
+static void ttp_fsm_enqueue_internal (u64 kid, enum ttp_events_enum evt)
+{
+    struct ttp_fsm_event *ev;
+
+    if (!ttp_evt_pget (&ev)) {
+        return;
+    }
+
+    ev->evt = evt;
+    ev->kid = kid;
+    ttp_evt_enqu (ev);
 }
 
 /* OPEN_RECD: Allocate Tag */
@@ -215,19 +230,12 @@ static bool ttp_fsm_sef__QUIESCE_START (struct ttp_fsm_event *ev)
     }
 
     lt->state = TTP_ST__CLOSE_RECD;
-
-    while (ttp_noc_dequ (lt)) {
-        ;
-    }
-
-    if (0) {
-        ev->evt = TTP_EV__INQ__NOT_QUIESCED;
+    if (lt->close_ack_pending && !lt->close_ack_sent && ttp_tag_is_quiesced (lt)) {
+        ttp_fsm_enqueue_internal (ev->kid, TTP_EV__INQ__YES_QUIESCED);
     }
     else {
-        ev->evt = TTP_EV__INQ__YES_QUIESCED;
+        ttp_fsm_enqueue_internal (ev->kid, TTP_EV__INQ__NOT_QUIESCED);
     }
-
-    ttp_evt_cpqu (ev);
     return true;
 }
 
@@ -264,6 +272,7 @@ enum ttp_opcodes_enum ttp_fsm_response_op[TTP_RS__NUM_EV] =
     [TTP_RS__OPEN_NACK]    = TTP_OP__TTP_OPEN_NACK,
     [TTP_RS__CLOSE]        = TTP_OP__TTP_CLOSE,
     [TTP_RS__CLOSE_ACK]    = TTP_OP__TTP_CLOSE_ACK,
+    [TTP_RS__CLOSE_NACK]   = TTP_OP__TTP_CLOSE_NACK,
     [TTP_RS__CLOSE_XACK]   = TTP_OP__TTP_CLOSE_ACK,
     [TTP_RS__REPLAY_DATA]  = TTP_OP__TTP_PAYLOAD,
     [TTP_RS__PAYLOAD]      = TTP_OP__TTP_PAYLOAD,
@@ -330,9 +339,59 @@ enum ttp_events_enum ttp_opcodes_to_events_map[TTP_OP__NUM_OP] = {
 
 static bool TTP_FSM_RS__common  (OPEN_ACK,    ttp_fsm_response_op[TTP_RS__OPEN_ACK   ]);
 static bool TTP_FSM_RS__common  (OPEN_NACK,   ttp_fsm_response_op[TTP_RS__OPEN_NACK  ]);
-static bool TTP_FSM_RS__common  (CLOSE_ACK,   ttp_fsm_response_op[TTP_RS__CLOSE_ACK  ]);
 static bool TTP_FSM_RS__common  (NACK,        ttp_fsm_response_op[TTP_RS__NACK       ]);
 static bool TTP_FSM_RS__common  (NACK_NOLINK, ttp_fsm_response_op[TTP_RS__NACK_NOLINK]);
+
+static bool ttp_fsm_close_replay_ready (struct ttp_link_tag *lt)
+{
+    if (!lt->close_blocked) {
+        return true;
+    }
+
+    if (!lt->close_tx_id) {
+        return true;
+    }
+
+    if (ttp_seq_geq_u32 (ttp_seq_next_u32 (lt->retire_id), lt->close_tx_id)) {
+        return true;
+    }
+
+    if (!ttp_tag_has_pending_noc (lt)) {
+        return true;
+    }
+
+    return false;
+}
+
+static u32 ttp_fsm_local_close_tx_id (struct ttp_link_tag *lt)
+{
+    return lt->close_tx_id ? lt->close_tx_id : lt->tx_seq_id;
+}
+
+static u32 ttp_fsm_local_close_rx_id (struct ttp_link_tag *lt)
+{
+    return lt->close_rx_id ? lt->close_rx_id : lt->rx_seq_id;
+}
+
+static bool ttp_fsm_close_need_nack (struct ttp_link_tag *lt, struct ttp_fsm_event *ev)
+{
+    u32 local_tx = ttp_fsm_local_close_tx_id (lt);
+
+    if (TTP_ST__CLOSE_SENT == lt->state) {
+        return ttp_seq_after_u32 (ev->psi.rxi_seq, ttp_seq_next_u32 (local_tx));
+    }
+
+    if (TTP_ST__OPEN == lt->state || TTP_ST__CLOSE_RECD == lt->state) {
+        return ttp_seq_after_u32 (ev->psi.rxi_seq, local_tx);
+    }
+
+    return false;
+}
+
+static u32 ttp_fsm_local_closing_rx_limit (struct ttp_link_tag *lt)
+{
+    return lt->close_rx_id ? lt->close_rx_id : lt->rx_seq_id;
+}
 
 
 TTP_NOINLINE
@@ -361,6 +420,7 @@ static bool ttp_fsm_rs__OPEN (struct ttp_fsm_event *ev)
     ev->psi.txi_seq = lt->retire_id;
     frh.ttp->conn_tx_seq = htonl (ev->psi.txi_seq);
 
+    lt->open_tx_pending = true;
     atomic_inc (&lt->opens);
     ttp_skb_xmit (skb);
     TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
@@ -383,6 +443,26 @@ static bool ttp_fsm_rs__CLOSE (struct ttp_fsm_event *ev)
         return false;
     }
 
+    if (!lt->close_tx_id) {
+        lt->close_tx_id = lt->tx_seq_id;
+        lt->close_rx_id = lt->rx_seq_id;
+    }
+
+    if (lt->close_blocked && !ttp_fsm_close_replay_ready (lt)) {
+        if (timer_pending (&lt->tmr)) {
+            mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_CLOSE_SENT));
+            TTP_EVLOG (ev, TTP_LG__LN_TIMER_RESTART, TTP_OP__invalid);
+        }
+        else {
+            lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_CLOSE_SENT);
+            add_timer (&lt->tmr);
+            TTP_EVLOG (ev, TTP_LG__LN_TIMER_START, TTP_OP__invalid);
+        }
+        return true;
+    }
+    lt->close_blocked = false;
+    lt->close_nack_rx_id = 0;
+
     if (!ttp_skb_prep (&skb, ev, op)) {
         TTP_EVLOG (ev, TTP_LG__PKT_DROP, op);
         return false;
@@ -390,8 +470,10 @@ static bool ttp_fsm_rs__CLOSE (struct ttp_fsm_event *ev)
 
     ttp_skb_pars (skb, &frh, NULL);
 
-    frh.ttp->conn_rx_seq = htonl (ev->psi.rxi_seq);
-    frh.ttp->conn_tx_seq = htonl (ev->psi.txi_seq);
+    ev->psi.rxi_seq = lt->close_rx_id;
+    ev->psi.txi_seq = lt->close_tx_id;
+    frh.ttp->conn_rx_seq = htonl (lt->close_rx_id);
+    frh.ttp->conn_tx_seq = htonl (lt->close_tx_id);
 
     ttp_skb_xmit (skb);
     TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
@@ -411,6 +493,82 @@ static bool ttp_fsm_rs__CLOSE (struct ttp_fsm_event *ev)
     return true;
 }
 
+TTP_NOINLINE
+static bool ttp_fsm_rs__CLOSE_NACK (struct ttp_fsm_event *ev)
+{
+    struct sk_buff *skb;
+    struct ttp_link_tag *lt;
+    struct ttp_frame_hdr frh;
+    enum ttp_opcodes_enum op = TTP_OP__TTP_CLOSE_NACK;
+    u32 tx_id, rx_id;
+
+    if (!(lt = ttp_rbtree_tag_get (ev->kid))) {
+        return false;
+    }
+
+    if (!ttp_skb_prep (&skb, ev, op)) {
+        TTP_EVLOG (ev, TTP_LG__PKT_DROP, op);
+        return false;
+    }
+
+    ttp_skb_pars (skb, &frh, NULL);
+
+    tx_id = ttp_fsm_local_close_tx_id (lt);
+    rx_id = ttp_fsm_local_close_rx_id (lt);
+    ev->psi.txi_seq = tx_id;
+    ev->psi.rxi_seq = rx_id;
+
+    frh.ttp->conn_tx_seq = htonl (tx_id);
+    frh.ttp->conn_rx_seq = htonl (rx_id);
+
+    ttp_skb_xmit (skb);
+    TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
+
+    TTP_DB1 ("%s: 0x%016llx.%d <<Sent: %s<<\n", __FUNCTION__,
+             cpu_to_be64 (ev->kid), ev->idx, TTP_OPCODE_NAME (op));
+    return true;
+}
+
+TTP_NOINLINE
+static bool ttp_fsm_rs__CLOSE_ACK (struct ttp_fsm_event *ev)
+{
+    struct sk_buff *skb;
+    struct ttp_link_tag *lt;
+    struct ttp_frame_hdr frh;
+    enum ttp_opcodes_enum op = TTP_OP__TTP_CLOSE_ACK;
+    u32 rx_id = ev->psi.rxi_seq;
+
+    if (!(lt = ttp_rbtree_tag_get (ev->kid))) {
+        return false;
+    }
+
+    if (!ttp_skb_prep (&skb, ev, op)) {
+        TTP_EVLOG (ev, TTP_LG__PKT_DROP, op);
+        return false;
+    }
+
+    ttp_skb_pars (skb, &frh, NULL);
+
+    if (lt->peer_close_tx_id) {
+        rx_id = lt->peer_close_tx_id;
+    }
+
+    ev->psi.rxi_seq = rx_id;
+    ev->psi.txi_seq = 0;
+    frh.ttp->conn_rx_seq = htonl (rx_id);
+    frh.ttp->conn_tx_seq = 0;
+
+    ttp_skb_xmit (skb);
+    TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
+
+    lt->close_ack_pending = false;
+    lt->close_ack_sent = true;
+
+    TTP_DB1 ("%s: 0x%016llx.%d <<Sent: %s<<\n", __FUNCTION__,
+             cpu_to_be64 (ev->kid), ev->idx, TTP_OPCODE_NAME (op));
+    return true;
+}
+
 
 TTP_NOINLINE
 static bool ttp_fsm_rs__CLOSE_XACK (struct ttp_fsm_event *ev)
@@ -419,6 +577,10 @@ static bool ttp_fsm_rs__CLOSE_XACK (struct ttp_fsm_event *ev)
     struct ttp_link_tag *lt;
     struct ttp_frame_hdr frh;
     enum ttp_opcodes_enum op = TTP_OP__TTP_CLOSE_ACK;
+
+    if (ev->tx_flags & TTP_NOC_TXF_CLOSE_NACK) {
+        return ttp_fsm_rs__CLOSE_NACK (ev);
+    }
 
     if (!(lt = ttp_rbtree_tag_get (ev->kid))) {
         return false;
@@ -433,17 +595,6 @@ static bool ttp_fsm_rs__CLOSE_XACK (struct ttp_fsm_event *ev)
 
     frh.ttp->conn_rx_seq = htonl (ev->psi.rxi_seq);
     frh.ttp->conn_tx_seq = ev->psi.txi_seq = 0; /* tx-id=0 for ACKs */
-
-/* CLOSE_NACK if:-
- *         [OPEN]: RxID > local TxID
- *   [CLOSE_RECD]: RxID > local TxID
- *   [CLOSE_SENT]: RxID > (local TxID + 1) */
-    if (    (  (TTP_ST__OPEN == lt->state || TTP_ST__CLOSE_RECD == lt->state) &&
-               (ntohl (frh.ttp->conn_rx_seq) > lt->tx_seq_id) ) ||
-            (  (TTP_ST__CLOSE_SENT == lt->state) &&
-               (ntohl (frh.ttp->conn_rx_seq) > (lt->tx_seq_id + 1)) )    ) {
-        frh.ttp->conn_opcode = op = TTP_OP__TTP_CLOSE_NACK;
-    }
 
     ttp_skb_xmit (skb);
     TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
@@ -492,11 +643,24 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
  *      TTP_NACK        TxID >  local RxID
  *      TTP_NACK_FULL   local is temporarily full
  * [CLOSE_SENT] / [CLOSE_RECD]
- *      TTP_NACK_NOLINK TxID >  local closing ID <-- ** NOT IMPLEMENTED YET **
+ *      TTP_NACK_NOLINK TxID >  local closing ID
  */
     if (TTP_ST__OPEN == lt->state ||
         TTP_ST__CLOSE_SENT == lt->state || TTP_ST__CLOSE_RECD == lt->state) {
-        if ((lt->rx_seq_id + 1) == pif.txi_seq) {
+        u32 expected_seq = ttp_seq_next_u32 (lt->rx_seq_id);
+        u32 close_limit = ttp_fsm_local_closing_rx_limit (lt);
+
+        if ((TTP_ST__CLOSE_SENT == lt->state || TTP_ST__CLOSE_RECD == lt->state) &&
+            ttp_seq_after_u32 (pif.txi_seq, close_limit)) {
+            op = TTP_OP__TTP_NACK_NOLINK;
+            ack_seq = close_limit;
+
+            TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, op);
+            TTP_DB1 ("`-> %s: NACK_NOLINK seq-id:%d (close-limit:%d)\n",
+                     __FUNCTION__, pif.txi_seq, close_limit);
+            atomic_inc (&ttp_stats.drp_ct);
+        }
+        else if (expected_seq == pif.txi_seq) {
             rv = ttpoe_socket_payload_rx (ev->kid, (u8 *)frh.noc, pif.noc_len);
             if (-ENOTCONN == rv && !lt->sock_managed) {
                 rv = ttpoe_noc_debug_rx ((u8 *)frh.noc, pif.noc_len);
@@ -525,7 +689,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
                      __FUNCTION__, pif.txi_seq, lt->rx_seq_id);
             atomic_inc (&ttp_stats.pld_ct);
         }
-        else if (pif.txi_seq && ((lt->rx_seq_id + 1) > pif.txi_seq)) {
+        else if (pif.txi_seq && ttp_seq_before_u32 (pif.txi_seq, expected_seq)) {
             op = TTP_OP__TTP_ACK;
             ack_seq = pif.txi_seq;
 
@@ -534,9 +698,9 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
                      __FUNCTION__, pif.txi_seq, lt->rx_seq_id);
             atomic_inc (&ttp_stats.drp_ct);
         }
-        else if (lt->rx_seq_id < pif.txi_seq) {
+        else if (ttp_seq_before_u32 (lt->rx_seq_id, pif.txi_seq)) {
             op = TTP_OP__TTP_NACK;
-            ack_seq = lt->rx_seq_id + 1;
+            ack_seq = expected_seq;
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, op);
             TTP_DB1 ("`-> %s: NACK future seq-id:%d (exp:%d+1)\n",
@@ -545,7 +709,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
         }
         else {
             op = TTP_OP__TTP_NACK;
-            ack_seq = lt->rx_seq_id + 1;
+            ack_seq = expected_seq;
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, op);
             TTP_DB1 ("`-> %s: NACK *UNEXPECTED* seq-id:%d (exp:%d+1)\n",
@@ -664,7 +828,7 @@ static bool ttp_fsm_rs__PAYLOAD2 (struct ttp_fsm_event *ev)
     }
 
     /* Send until TxID > remote closing ID, then stall */
-    if (ev->psi.txi_seq > lt->rx_seq_id) {
+    if (ttp_seq_after_u32 (ev->psi.txi_seq, lt->rx_seq_id)) {
         return false;
     }
 
@@ -728,6 +892,7 @@ ttp_fsm_fn ttp_fsm_response_fn[TTP_RS__NUM_EV] =
     [TTP_RS__OPEN_NACK]    = ttp_fsm_rs__OPEN_NACK,
     [TTP_RS__CLOSE]        = ttp_fsm_rs__CLOSE,
     [TTP_RS__CLOSE_ACK]    = ttp_fsm_rs__CLOSE_ACK,
+    [TTP_RS__CLOSE_NACK]   = ttp_fsm_rs__CLOSE_NACK,
     [TTP_RS__CLOSE_XACK]   = ttp_fsm_rs__CLOSE_XACK,
     [TTP_RS__REPLAY_DATA]  = ttp_fsm_rs__REPLAY_DATA,
     [TTP_RS__PAYLOAD]      = ttp_fsm_rs__PAYLOAD,
@@ -750,6 +915,14 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_OPEN (struct ttp_fsm_event *qev)
 
     if ((lt = ttp_rbtree_tag_get (qev->kid))) {
         lt->rx_seq_id = qev->psi.txi_seq; /* init tag-rx-seq-id with OPEN's tx-seq-id */
+        if (TTP_ST__OPEN_SENT == lt->state) {
+            lt->open_tx_pending = false;
+        }
+        if (TTP_ST__OPEN_RECD == lt->state) {
+            qev->fsm_override = 1;
+            qev->fsm_response = TTP_RS__OPEN_ACK;
+            qev->fsm_next_state = TTP_ST__stay;
+        }
         TTP_DB1 ("`-> found existing tag (dup TTP_OPEN)\n");
     }
     return true;
@@ -770,10 +943,38 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_OPEN_ACK (struct ttp_fsm_event *qev)
     }
 
     lt->retire_id = qev->psi.rxi_seq; /* store seq-id open (got in ACK as rxi-seq) */
+    if (lt->open_tx_pending) {
+        lt->open_tx_pending = false;
+        if (TTP_ST__OPEN_RECD == lt->state) {
+            qev->fsm_override = 1;
+            qev->fsm_response = TTP_RS__none;
+            qev->fsm_next_state = TTP_ST__OPEN;
+        }
+    }
 
     if (timer_pending (&lt->tmr)) {
         tv = del_timer (&lt->tmr);
         TTP_EVLOG (qev, TTP_LG__TIMER_DELETE, TTP_OP__TTP_OPEN_ACK);
+    }
+    return true;
+}
+
+
+TTP_NOINLINE
+static bool ttp_fsm_ev_hdl__RXQ__TTP_OPEN_NACK (struct ttp_fsm_event *qev)
+{
+    int tv;
+    struct ttp_link_tag *lt;
+
+    if (!(lt = ttp_rbtree_tag_get (qev->kid))) {
+        return false;
+    }
+
+    lt->open_tx_pending = false;
+    if (timer_pending (&lt->tmr)) {
+        tv = del_timer (&lt->tmr);
+        (void)tv;
+        TTP_EVLOG (qev, TTP_LG__TIMER_DELETE, TTP_OP__TTP_OPEN_NACK);
     }
     return true;
 }
@@ -853,6 +1054,140 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK (struct ttp_fsm_event *qev)
     return marked;
 }
 
+TTP_NOINLINE
+static bool ttp_fsm_ev_hdl__RXQ__TTP_CLOSE (struct ttp_fsm_event *qev)
+{
+    struct ttp_link_tag *lt;
+
+    TTP_DB1 ("%s: 0x%016llx.%d: rx:%d tx:%d\n", __FUNCTION__,
+             cpu_to_be64 (qev->kid), qev->idx, qev->psi.rxi_seq, qev->psi.txi_seq);
+
+    if (!(lt = ttp_rbtree_tag_get (qev->kid))) {
+        return false;
+    }
+
+    if (ttp_fsm_close_need_nack (lt, qev)) {
+        qev->tx_flags |= TTP_NOC_TXF_CLOSE_NACK;
+        qev->fsm_override = 1;
+        qev->fsm_response = TTP_RS__CLOSE_NACK;
+        qev->fsm_next_state = TTP_ST__stay;
+        return true;
+    }
+
+    lt->peer_close_tx_id = qev->psi.txi_seq;
+    lt->close_ack_pending = true;
+    lt->close_ack_sent = false;
+    qev->fsm_override = 1;
+    qev->fsm_response = TTP_RS__none;
+    if (TTP_ST__CLOSE_RECD == lt->state) {
+        qev->fsm_next_state = TTP_ST__stay;
+        if (ttp_tag_is_quiesced (lt)) {
+            ttp_fsm_enqueue_internal (qev->kid, TTP_EV__INQ__YES_QUIESCED);
+        }
+    }
+    else {
+        qev->fsm_next_state = TTP_ST__CLOSE_RECD;
+    }
+    return true;
+}
+
+TTP_NOINLINE
+static bool ttp_fsm_ev_hdl__RXQ__TTP_CLOSE_NACK (struct ttp_fsm_event *qev)
+{
+    struct ttp_link_tag *lt;
+
+    TTP_DB1 ("%s: 0x%016llx.%d: rx:%d tx:%d\n", __FUNCTION__,
+             cpu_to_be64 (qev->kid), qev->idx, qev->psi.rxi_seq, qev->psi.txi_seq);
+
+    if (!(lt = ttp_rbtree_tag_get (qev->kid))) {
+        return false;
+    }
+
+    lt->close_nack_rx_id = qev->psi.rxi_seq;
+    lt->close_blocked = true;
+    if (ttp_fsm_close_replay_ready (lt)) {
+        lt->close_blocked = false;
+        lt->close_nack_rx_id = 0;
+    }
+    return true;
+}
+
+TTP_NOINLINE
+static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_FULL (struct ttp_fsm_event *qev)
+{
+    bool marked = false;
+    struct ttp_link_tag *lt;
+
+    TTP_DB1 ("%s: 0x%016llx.%d: rx:%d tx:%d\n", __FUNCTION__,
+             cpu_to_be64 (qev->kid), qev->idx, qev->psi.rxi_seq, qev->psi.txi_seq);
+
+    if (!(lt = ttp_rbtree_tag_get (qev->kid))) {
+        return false;
+    }
+
+    lt->full_blocked = true;
+    if (lt->base_seq && ttp_seq_before_u32 (lt->base_seq, lt->tx_seq_id)) {
+        marked = ttp_noc_mark_retransmit_from (lt, lt->base_seq);
+    }
+    else if (!ttp_tag_has_pending_noc (lt)) {
+        lt->full_blocked = false;
+    }
+
+    if (marked) {
+        if (timer_pending (&lt->tmr)) {
+            mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT));
+            TTP_EVLOG (qev, TTP_LG__LN_TIMER_RESTART, TTP_OP__TTP_NACK_FULL);
+        }
+        else {
+            lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT);
+            add_timer (&lt->tmr);
+            TTP_EVLOG (qev, TTP_LG__LN_TIMER_START, TTP_OP__TTP_NACK_FULL);
+        }
+    }
+
+    ttp_noc_requ (lt);
+    return true;
+}
+
+TTP_NOINLINE
+static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_NOLINK (struct ttp_fsm_event *qev)
+{
+    struct ttp_link_tag *lt;
+
+    TTP_DB1 ("%s: 0x%016llx.%d: rx:%d tx:%d\n", __FUNCTION__,
+             cpu_to_be64 (qev->kid), qev->idx, qev->psi.rxi_seq, qev->psi.txi_seq);
+
+    if (!(lt = ttp_rbtree_tag_get (qev->kid))) {
+        return false;
+    }
+
+    if (TTP_ST__OPEN == lt->state ||
+        TTP_ST__OPEN_SENT == lt->state ||
+        TTP_ST__OPEN_RECD == lt->state) {
+        lt->open_tx_pending = true;
+        qev->fsm_override = 1;
+        qev->fsm_response = TTP_RS__OPEN;
+        qev->fsm_next_state = TTP_ST__OPEN_SENT;
+        return true;
+    }
+
+    if (TTP_ST__CLOSE_SENT == lt->state || TTP_ST__CLOSE_RECD == lt->state) {
+        if (ttp_tag_is_quiesced (lt) || !ttp_tag_has_pending_noc (lt)) {
+            qev->fsm_override = 1;
+            qev->fsm_response = TTP_RS__NOC_END;
+            qev->fsm_next_state = TTP_ST__CLOSED;
+            return true;
+        }
+
+        qev->fsm_override = 1;
+        qev->fsm_response = TTP_RS__none;
+        qev->fsm_next_state = TTP_ST__stay;
+        return true;
+    }
+
+    return true;
+}
+
 
 TTP_NOINLINE
 static bool ttp_fsm_ev_hdl__RXQ__TTP_PAYLOAD (struct ttp_fsm_event *qev)
@@ -879,8 +1214,13 @@ ttp_fsm_fn ttp_fsm_event_handle_fn[TTP_EV__NUM_EV] =
 {
     [TTP_EV__RXQ__TTP_OPEN]     = ttp_fsm_ev_hdl__RXQ__TTP_OPEN,
     [TTP_EV__RXQ__TTP_OPEN_ACK] = ttp_fsm_ev_hdl__RXQ__TTP_OPEN_ACK,
+    [TTP_EV__RXQ__TTP_OPEN_NACK] = ttp_fsm_ev_hdl__RXQ__TTP_OPEN_NACK,
+    [TTP_EV__RXQ__TTP_CLOSE]    = ttp_fsm_ev_hdl__RXQ__TTP_CLOSE,
+    [TTP_EV__RXQ__TTP_CLOSE_NACK] = ttp_fsm_ev_hdl__RXQ__TTP_CLOSE_NACK,
     [TTP_EV__RXQ__TTP_ACK]      = ttp_fsm_ev_hdl__RXQ__TTP_ACK,
     [TTP_EV__RXQ__TTP_NACK]     = ttp_fsm_ev_hdl__RXQ__TTP_NACK,
+    [TTP_EV__RXQ__TTP_NACK_FULL] = ttp_fsm_ev_hdl__RXQ__TTP_NACK_FULL,
+    [TTP_EV__RXQ__TTP_NACK_NOLINK] = ttp_fsm_ev_hdl__RXQ__TTP_NACK_NOLINK,
     [TTP_EV__RXQ__TTP_PAYLOAD]  = ttp_fsm_ev_hdl__RXQ__TTP_PAYLOAD,
     /* all other handlers are NULL */
 };
@@ -903,6 +1243,7 @@ ttp_fsm_fn ttp_fsm_event_handle_fn[TTP_EV__NUM_EV] =
 #define     rs_OPEN_ACK__ns_stay        { .response = TTP_RS__OPEN_ACK    ,  .next_state = TTP_ST__stay       , }
 #define  rs_NACK_NOLINK__ns_stay        { .response = TTP_RS__NACK_NOLINK ,  .next_state = TTP_ST__stay       , }
 #define   rs_CLOSE_XACK__ns_stay        { .response = TTP_RS__CLOSE_XACK  ,  .next_state = TTP_ST__stay       , }
+#define   rs_CLOSE_NACK__ns_stay        { .response = TTP_RS__CLOSE_NACK  ,  .next_state = TTP_ST__stay       , }
 #define    rs_CLOSE_ACK__ns_stay        { .response = TTP_RS__CLOSE_ACK   ,  .next_state = TTP_ST__stay       , }
 #define  rs_REPLAY_DATA__ns_stay        { .response = TTP_RS__REPLAY_DATA ,  .next_state = TTP_ST__stay       , }
 #define        rs_CLOSE__ns_CLOSED      { .response = TTP_RS__CLOSE       ,  .next_state = TTP_ST__CLOSED     , }
@@ -914,6 +1255,7 @@ ttp_fsm_fn ttp_fsm_event_handle_fn[TTP_EV__NUM_EV] =
 #define    rs_OPEN_NACK__ns_CLOSED      { .response = TTP_RS__OPEN_NACK   ,  .next_state = TTP_ST__CLOSED     , }
 #define      rs_NOC_END__ns_CLOSE_RECD  { .response = TTP_RS__NOC_END     ,  .next_state = TTP_ST__CLOSE_RECD , }
 #define         rs_none__ns_CLOSE_SENT  { .response = TTP_RS__none        ,  .next_state = TTP_ST__CLOSE_SENT , }
+#define         rs_none__ns_CLOSE_RECD  { .response = TTP_RS__none        ,  .next_state = TTP_ST__CLOSE_RECD , }
 #define        rs_CLOSE__ns_CLOSE_SENT  { .response = TTP_RS__CLOSE       ,  .next_state = TTP_ST__CLOSE_SENT , }
 #define     rs_OPEN_ACK__ns_OPEN        { .response = TTP_RS__OPEN_ACK    ,  .next_state = TTP_ST__OPEN       , }
 #define         rs_none__ns_OPEN        { .response = TTP_RS__none        ,  .next_state = TTP_ST__OPEN       , }
@@ -930,12 +1272,12 @@ struct ttp_fsm_state_var ttp_fsm_table[TTP_EV__NUM_EV][TTP_ST__NUM_ST] = /*     
     [TTP_EV__TXQ__TTP_PAYLOAD]     = { _no_rs__no_ns_  ,         rs_STALL__ns_stay        ,       rs_STALL__ns_stay        ,        rs_STALL__ns_stay    ,     rs_PAYLOAD__ns_stay        ,     rs_PAYLOAD2__ns_stay       ,      rs_PAYLOAD2__ns_stay       , },
     [TTP_EV__TXQ__REPLAY_DATA]     = { _no_rs__no_ns_  ,          rs_OPEN__ns_OPEN_SENT   ,     rs_PAYLOAD__ns_stay        ,      rs_PAYLOAD__ns_stay    ,     rs_PAYLOAD__ns_stay        ,        rs_STALL__ns_stay       ,       rs_PAYLOAD__ns_stay       , },
     [TTP_EV__TXQ__REPLAY_CLOSE]    = { _no_rs__no_ns_  ,          rs_none__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,       rs_CLOSE__ns_CLOSE_SENT  ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
-    [TTP_EV__RXQ__TTP_OPEN]        = { _no_rs__no_ns_  ,          rs_none__ns_OPEN_RECD   ,    rs_OPEN_ACK__ns_OPEN        ,         rs_none__ns_stay    ,    rs_OPEN_ACK__ns_stay        ,     rs_OPEN_ACK__ns_stay       ,      rs_OPEN_ACK__ns_stay       , },
+    [TTP_EV__RXQ__TTP_OPEN]        = { _no_rs__no_ns_  ,          rs_none__ns_OPEN_RECD   ,    rs_OPEN_ACK__ns_OPEN        ,     rs_OPEN_ACK__ns_stay ,    rs_OPEN_ACK__ns_stay        ,     rs_OPEN_ACK__ns_stay       ,      rs_OPEN_ACK__ns_stay       , },
     [TTP_EV__RXQ__TTP_OPEN_ACK]    = { _no_rs__no_ns_  ,       rs_ILLEGAL__ns_stay        ,        rs_none__ns_OPEN        ,         rs_none__ns_stay    ,        rs_none__ns_OPEN        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_OPEN_NACK]   = { _no_rs__no_ns_  ,       rs_ILLEGAL__ns_stay        ,    rs_NOC_FAIL__ns_CLOSED      ,      rs_ILLEGAL__ns_stay    ,     rs_ILLEGAL__ns_stay        ,      rs_ILLEGAL__ns_stay       ,       rs_ILLEGAL__ns_stay       , },
-    [TTP_EV__RXQ__TTP_CLOSE]       = { _no_rs__no_ns_  ,     rs_CLOSE_ACK__ns_stay        ,   rs_CLOSE_ACK__ns_stay        ,    rs_CLOSE_ACK__ns_stay    ,  rs_CLOSE_XACK__ns_CLOSE_RECD  ,   rs_CLOSE_XACK__ns_stay       ,    rs_CLOSE_XACK__ns_stay       , },
+    [TTP_EV__RXQ__TTP_CLOSE]       = { _no_rs__no_ns_  ,          rs_none__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,         rs_none__ns_CLOSE_RECD  ,        rs_none__ns_CLOSE_RECD    ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_CLOSE_ACK]   = { _no_rs__no_ns_  ,          rs_none__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,        rs_none__ns_stay        ,      rs_NOC_END__ns_CLOSED     ,          rs_none__ns_CLOSED     , },
-    [TTP_EV__RXQ__TTP_CLOSE_NACK]  = { _no_rs__no_ns_  ,       rs_ILLEGAL__ns_stay        ,     rs_ILLEGAL__ns_stay        ,      rs_ILLEGAL__ns_stay    ,     rs_ILLEGAL__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
+    [TTP_EV__RXQ__TTP_CLOSE_NACK]  = { _no_rs__no_ns_  ,       rs_ILLEGAL__ns_stay        ,     rs_ILLEGAL__ns_stay        ,      rs_ILLEGAL__ns_stay    ,         rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_PAYLOAD]     = { _no_rs__no_ns_  ,   rs_NACK_NOLINK__ns_stay        , rs_NACK_NOLINK__ns_stay        ,  rs_NACK_NOLINK__ns_stay    ,         rs_ACK__ns_stay        ,          rs_ACK__ns_stay       ,           rs_ACK__ns_stay       , },
     [TTP_EV__RXQ__TTP_ACK]         = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_DROP__ns_stay        ,         rs_DROP__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_NACK]        = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_DROP__ns_stay        ,         rs_DROP__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
@@ -955,5 +1297,5 @@ struct ttp_fsm_state_var ttp_fsm_table[TTP_EV__NUM_EV][TTP_ST__NUM_ST] = /*     
     [TTP_EV__INQ__ALLOC_TAG]       = { _no_rs__no_ns_  ,          rs_none__ns_stay        ,        rs_none__ns_stay        ,     rs_OPEN_ACK__ns_OPEN    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__INQ__NO_TAG]          = { _no_rs__no_ns_  ,          rs_none__ns_stay        ,        rs_none__ns_stay        ,    rs_OPEN_NACK__ns_CLOSED  ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__INQ__YES_QUIESCED]    = { _no_rs__no_ns_  ,          rs_none__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,     rs_CLOSE_ACK__ns_CLOSED     , },
-    [TTP_EV__INQ__NOT_QUIESCED]    = { _no_rs__no_ns_  ,          rs_none__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,    rs_CLOSE_XACK__ns_stay       , },
+    [TTP_EV__INQ__NOT_QUIESCED]    = { _no_rs__no_ns_  ,          rs_none__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,         rs_none__ns_stay       , },
 };

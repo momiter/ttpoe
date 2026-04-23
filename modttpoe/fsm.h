@@ -218,6 +218,7 @@ enum ttp_response_enum {
 
     TTP_RS__CLOSE,
     TTP_RS__CLOSE_ACK,
+    TTP_RS__CLOSE_NACK,
     TTP_RS__CLOSE_XACK,
 
     TTP_RS__REPLAY_DATA,

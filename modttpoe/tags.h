@@ -93,11 +93,15 @@ struct ttp_fsm_event {
     struct sk_buff       *rsk;
     struct sk_buff       *tsk;
     u8                    tx_flags;
+    u8                    fsm_override;
+    u8                    fsm_response;
+    u8                    fsm_next_state;
 } __attribute__((packed));
 
 #define TTP_NOC_TXF_SENT     BIT(0)
 #define TTP_NOC_TXF_ACKED    BIT(1)
 #define TTP_NOC_TXF_RETRANS  BIT(2)
+#define TTP_NOC_TXF_CLOSE_NACK BIT(3)
 
 struct ttp_sock;
 
@@ -213,6 +217,15 @@ struct ttp_link_tag {
     u32 base_seq;
     u32 next_seq;
     u32 retransmit_from;
+    u32 close_tx_id;
+    u32 close_rx_id;
+    u32 close_nack_rx_id;
+    u32 peer_close_tx_id;
+    bool close_blocked;
+    bool full_blocked;
+    bool close_ack_pending;
+    bool close_ack_sent;
+    bool open_tx_pending;
 
     atomic_t opens;
     struct ttp_sock *sock;
@@ -326,6 +339,7 @@ extern int  ttp_tag_add (u64 kid);
 extern void ttp_tag_reset (struct ttp_link_tag *lt);
 extern void ttp_tag_force_reset (struct ttp_link_tag *lt);
 extern bool ttp_tag_has_pending_noc (struct ttp_link_tag *lt);
+extern bool ttp_tag_is_quiesced (struct ttp_link_tag *lt);
 extern void ttp_tag_mark_orphaned (struct ttp_link_tag *lt);
 extern void ttp_tag_maybe_cleanup_orphan (struct ttp_link_tag *lt);
 

@@ -162,6 +162,7 @@ char *ttp_response_names[] =
     [TTP_RS__OPEN_NACK]    = "OPEN_NACK",
     [TTP_RS__CLOSE]        = "CLOSE",
     [TTP_RS__CLOSE_ACK]    = "CLOSE_ACK",
+    [TTP_RS__CLOSE_NACK]   = "CLOSE_NACK",
     [TTP_RS__CLOSE_XACK]   = "CLOSE_?ACK",
     [TTP_RS__REPLAY_DATA]  = "REPLAY_DATA",
     [TTP_RS__PAYLOAD]      = "PAYLOAD",
