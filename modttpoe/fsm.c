@@ -676,10 +676,12 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
                 TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, TTP_OP__TTP_NACK_FULL);
             }
             if (rv) {
+                lt->rx_full_blocked = true;
                 op = TTP_OP__TTP_NACK_FULL;
                 goto send;
             }
 
+            lt->rx_full_blocked = false;
             op = TTP_OP__TTP_ACK;
             lt->rx_seq_id++;    /* update tag-rx-seq-id */
             ack_seq = pif.txi_seq;
@@ -699,12 +701,18 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             atomic_inc (&ttp_stats.drp_ct);
         }
         else if (ttp_seq_before_u32 (lt->rx_seq_id, pif.txi_seq)) {
-            op = TTP_OP__TTP_NACK;
-            ack_seq = expected_seq;
+            if (lt->rx_full_blocked) {
+                op = TTP_OP__TTP_NACK_FULL;
+                ack_seq = lt->rx_seq_id;
+            }
+            else {
+                op = TTP_OP__TTP_NACK;
+                ack_seq = expected_seq;
+            }
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, op);
-            TTP_DB1 ("`-> %s: NACK future seq-id:%d (exp:%d+1)\n",
-                     __FUNCTION__, pif.txi_seq, lt->rx_seq_id);
+            TTP_DB1 ("`-> %s: %s future seq-id:%d (exp:%d+1)\n",
+                     __FUNCTION__, TTP_OPCODE_NAME (op), pif.txi_seq, lt->rx_seq_id);
             atomic_inc (&ttp_stats.drp_ct);
         }
         else {
@@ -1126,24 +1134,23 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_FULL (struct ttp_fsm_event *qev)
     }
 
     lt->full_blocked = true;
-    if (lt->base_seq && ttp_seq_before_u32 (lt->base_seq, lt->tx_seq_id)) {
-        if (lt->full_retry >= TTP_FULL_MAX_RETRY) {
-            int dropped = lt->tct;
+    if (lt->full_retry >= TTP_FULL_MAX_RETRY) {
+        int dropped = lt->tct;
 
-            ttpoe_socket_link_error (lt->_rkid, ETIMEDOUT);
-            if (timer_pending (&lt->tmr)) {
-                del_timer (&lt->tmr);
-            }
-            while (ttp_noc_dequ (lt)) {
-                ;
-            }
-            ttp_stats.nocq -= dropped;
-            ttp_tag_reset (lt);
-            return true;
+        ttpoe_socket_link_error (lt->_rkid, ETIMEDOUT);
+        if (timer_pending (&lt->tmr)) {
+            del_timer (&lt->tmr);
         }
-        marked = ttp_noc_mark_retransmit_one (lt, lt->base_seq);
+        while (ttp_noc_dequ (lt)) {
+            ;
+        }
+        ttp_stats.nocq -= dropped;
+        ttp_tag_reset (lt);
+        return true;
     }
-    else if (!ttp_tag_has_pending_noc (lt)) {
+
+    marked = ttp_noc_mark_retransmit_one (lt, lt->base_seq);
+    if (!marked && !ttp_tag_has_pending_noc (lt)) {
         lt->full_blocked = false;
         lt->full_backoff_active = false;
         lt->full_retry = 0;

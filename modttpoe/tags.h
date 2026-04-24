@@ -228,6 +228,7 @@ struct ttp_link_tag {
     bool close_blocked;
     bool full_blocked;
     bool full_backoff_active;
+    bool rx_full_blocked;
     bool close_ack_pending;
     bool close_ack_sent;
     bool open_tx_pending;

@@ -508,6 +508,11 @@ bool ttp_noc_mark_retransmit_one (struct ttp_link_tag *lt, u32 seq)
 
     mutex_lock (&ttp_global_root_head.event_mutx);
 
+    ttp_noc_refresh_window_locked (lt);
+    if (!seq || ttp_seq_before_u32 (seq, lt->base_seq)) {
+        seq = lt->base_seq;
+    }
+
     ev = ttp_noc_find_seq_locked (lt, seq);
     if (ev && !ttp_noc_evt_is_acked (ev) && ttp_noc_evt_is_sent (ev)) {
         ev->tx_flags |= TTP_NOC_TXF_RETRANS;
@@ -656,6 +661,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->peer_close_tx_id = 0;
     lt->close_blocked = false;
     lt->full_blocked = false;
+    lt->rx_full_blocked = false;
     lt->close_ack_pending = false;
     lt->close_ack_sent = false;
     lt->open_tx_pending = false;
