@@ -413,6 +413,7 @@ int main(int argc, char **argv)
     };
     uint8_t frame[TTP_MAX_FRAME_LEN];
     uint8_t node[3];
+    uint8_t if_mac[ETH_ALEN];
     int ifindex = 0;
     int rc;
     size_t frame_len;
@@ -538,7 +539,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    rc = get_if_info(opts.ifname, &ifindex, node);
+    rc = get_if_info(opts.ifname, &ifindex, if_mac);
     if (rc) {
         fprintf(stderr, "failed to query interface %s: %s\n", opts.ifname, strerror(-rc));
         return 1;
@@ -546,7 +547,7 @@ int main(int argc, char **argv)
     if (!opts.src_mac_set) {
         uint8_t saved_node[3] = { opts.src_mac[3], opts.src_mac[4], opts.src_mac[5] };
 
-        memcpy(opts.src_mac, node, ETH_ALEN);
+        memcpy(opts.src_mac, if_mac, ETH_ALEN);
         if (opts.src_node_set) {
             opts.src_mac[3] = saved_node[0];
             opts.src_mac[4] = saved_node[1];
