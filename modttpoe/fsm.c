@@ -1127,25 +1127,38 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_FULL (struct ttp_fsm_event *qev)
 
     lt->full_blocked = true;
     if (lt->base_seq && ttp_seq_before_u32 (lt->base_seq, lt->tx_seq_id)) {
-        marked = ttp_noc_mark_retransmit_from (lt, lt->base_seq);
+        if (lt->full_retry >= TTP_FULL_MAX_RETRY) {
+            int dropped = lt->tct;
+
+            ttpoe_socket_link_error (lt->_rkid, ETIMEDOUT);
+            if (timer_pending (&lt->tmr)) {
+                del_timer (&lt->tmr);
+            }
+            while (ttp_noc_dequ (lt)) {
+                ;
+            }
+            ttp_stats.nocq -= dropped;
+            ttp_tag_reset (lt);
+            return true;
+        }
+        marked = ttp_noc_mark_retransmit_one (lt, lt->base_seq);
     }
     else if (!ttp_tag_has_pending_noc (lt)) {
         lt->full_blocked = false;
+        lt->full_backoff_active = false;
+        lt->full_retry = 0;
     }
 
     if (marked) {
-        if (timer_pending (&lt->tmr)) {
-            mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT));
-            TTP_EVLOG (qev, TTP_LG__LN_TIMER_RESTART, TTP_OP__TTP_NACK_FULL);
-        }
-        else {
-            lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT);
-            add_timer (&lt->tmr);
-            TTP_EVLOG (qev, TTP_LG__LN_TIMER_START, TTP_OP__TTP_NACK_FULL);
-        }
+        ttp_noc_start_full_backoff (lt, qev);
+        lt->full_retry++;
+    }
+    else {
+        lt->full_blocked = false;
+        lt->full_backoff_active = false;
+        lt->full_retry = 0;
     }
 
-    ttp_noc_requ (lt);
     return true;
 }
 

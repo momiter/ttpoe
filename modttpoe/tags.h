@@ -187,6 +187,9 @@ extern struct ttp_link_tag_global ttp_global_root_head;
 #define TTP_TMX_PAYLOAD_SENT  375  /* 3x */
 #define TTP_TMX_CLOSE_SENT    500  /* 4x */
 #define TTP_TMX_PAYLOAD2_SENT 625  /* 5x */
+#define TTP_TMX_FULL_BASE_MS  100
+#define TTP_TMX_FULL_MAX_MS  1000
+#define TTP_FULL_MAX_RETRY     16
 
 
 /* Tag value of a single 148b tag entry */
@@ -203,6 +206,7 @@ struct ttp_link_tag {
     u16                tct;     /* tx-queue count */
     u16                txt;     /* tx-scheduled count */
     u16                try;     /* tx-retry count */
+    u16                full_retry; /* NACK_FULL probe retry count */
 
     u8  valid;                  /* tag valid */
     u8  state;                  /* 3b state[2:0] in HW; in SW use enum ttp_states_enum */
@@ -223,6 +227,7 @@ struct ttp_link_tag {
     u32 peer_close_tx_id;
     bool close_blocked;
     bool full_blocked;
+    bool full_backoff_active;
     bool close_ack_pending;
     bool close_ack_sent;
     bool open_tx_pending;
@@ -364,6 +369,8 @@ extern void ttp_evt_cpqu (struct ttp_fsm_event *ev);
 extern bool ttp_evt_pget (struct ttp_fsm_event **evp);
 extern bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced);
 extern bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq);
+extern bool ttp_noc_mark_retransmit_one (struct ttp_link_tag *lt, u32 seq);
+extern void ttp_noc_start_full_backoff (struct ttp_link_tag *lt, struct ttp_fsm_event *qev);
 extern void ttp_noc_mark_timeout (struct ttp_link_tag *lt);
 
 #endif

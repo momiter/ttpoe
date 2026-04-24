@@ -469,6 +469,8 @@ bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced)
     if (moved && lt->base_seq != old_base) {
         lt->try = 0;
         lt->full_blocked = false;
+        lt->full_backoff_active = false;
+        lt->full_retry = 0;
     }
     if (ttp_noc_close_replay_ready_locked (lt)) {
         lt->close_blocked = false;
@@ -493,6 +495,28 @@ out_unlock:
     }
 
     return matched;
+}
+
+bool ttp_noc_mark_retransmit_one (struct ttp_link_tag *lt, u32 seq)
+{
+    bool marked = false;
+    struct ttp_fsm_event *ev;
+
+    if (!lt || !seq) {
+        return false;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+
+    ev = ttp_noc_find_seq_locked (lt, seq);
+    if (ev && !ttp_noc_evt_is_acked (ev) && ttp_noc_evt_is_sent (ev)) {
+        ev->tx_flags |= TTP_NOC_TXF_RETRANS;
+        lt->retransmit_from = seq;
+        marked = true;
+    }
+
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+    return marked;
 }
 
 bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
@@ -523,6 +547,42 @@ bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
 
     mutex_unlock (&ttp_global_root_head.event_mutx);
     return marked;
+}
+
+static unsigned int ttp_noc_full_backoff_ms (struct ttp_link_tag *lt)
+{
+    unsigned int shift;
+    unsigned int delay;
+
+    if (!lt) {
+        return TTP_TMX_FULL_BASE_MS;
+    }
+
+    shift = min_t (unsigned int, lt->full_retry, 10);
+    delay = TTP_TMX_FULL_BASE_MS << shift;
+    return min_t (unsigned int, delay, TTP_TMX_FULL_MAX_MS);
+}
+
+void ttp_noc_start_full_backoff (struct ttp_link_tag *lt, struct ttp_fsm_event *qev)
+{
+    unsigned int delay;
+
+    if (!lt) {
+        return;
+    }
+
+    delay = ttp_noc_full_backoff_ms (lt);
+    lt->full_backoff_active = true;
+
+    if (timer_pending (&lt->tmr)) {
+        mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (delay));
+        TTP_EVLOG (qev, TTP_LG__LN_TIMER_RESTART, TTP_OP__TTP_NACK_FULL);
+    }
+    else {
+        lt->tmr.expires = jiffies + msecs_to_jiffies (delay);
+        add_timer (&lt->tmr);
+        TTP_EVLOG (qev, TTP_LG__LN_TIMER_START, TTP_OP__TTP_NACK_FULL);
+    }
 }
 
 void ttp_noc_mark_timeout (struct ttp_link_tag *lt)
@@ -605,6 +665,8 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->tct = 0;        /* tx-queue count */
     lt->txt = 0;        /* tx-scheduled count */
     lt->try = 0;        /* tx-retry count */
+    lt->full_retry = 0;
+    lt->full_backoff_active = false;
 
     lt->_rkid = 0ULL;   /* clear whole raw key id */
 
@@ -1304,7 +1366,16 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
             lt->close_blocked = false;
             lt->close_nack_rx_id = 0;
         }
-        tev = ttp_noc_first_retrans_locked (lt);
+        if (lt->full_blocked) {
+            tev = ttp_noc_find_seq_locked (lt, lt->base_seq);
+            if (!tev || !ttp_noc_evt_is_sent (tev) || ttp_noc_evt_is_acked (tev) ||
+                !ttp_noc_evt_is_retrans (tev)) {
+                break;
+            }
+        }
+        else {
+            tev = ttp_noc_first_retrans_locked (lt);
+        }
         if (tev) {
             if (tev->psi.txi_seq == lt->base_seq && lt->try >= max_retry) {
                 fatal = true;
@@ -1324,6 +1395,9 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
                      lt->try, TTP_EVENT_NAME (tev->evt), ev->psi.noc_len, ev->psi.txi_seq,
                      TTP_EVENTS_FENCE_TO_STR (tev->mrk));
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_REQ, TTP_OP__TTP_PAYLOAD);
+            if (lt->full_blocked) {
+                break;
+            }
             continue;
         }
 
@@ -1428,6 +1502,11 @@ static void ttp_do_tag_work (struct work_struct *wk)
     });
 
     if (do_tex) {
+        if (lt->full_backoff_active) {
+            lt->full_backoff_active = false;
+            ttp_noc_requ (lt);
+            return;
+        }
         if (ttp_evt_pget (&ev)) {
             ev->evt = TTP_EV__INQ__TIMEOUT;
             ev->kid = lt->_rkid;
