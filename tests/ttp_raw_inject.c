@@ -79,7 +79,7 @@ static void usage(const char *prog)
         "  --dst-node-shim HEX24  Override TSH destination node only\n"
         "  --opcode OP            Name or number: open, open-ack, close, payload, ack,\n"
         "                         nack, nack-full, nack-nolink, close-ack, close-nack\n"
-        "  --vc N                 VC id, default 0\n"
+        "  --vc N                 VC id, default 2 (DATA VC)\n"
         "  --tx-id N              TTP TxID, default 0\n"
         "  --rx-id N              TTP RxID, default 0\n"
         "  --payload TEXT         NOC payload bytes for PAYLOAD or malformed control tests\n"
@@ -408,7 +408,7 @@ int main(int argc, char **argv)
 {
     struct inject_opts opts = {
         .opcode = -1,
-        .vc = 0,
+        .vc = TTP_VC__DATA,
         .count = 1,
     };
     uint8_t frame[TTP_MAX_FRAME_LEN];

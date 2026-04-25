@@ -87,6 +87,25 @@
 #include "socket.h"
 #include "print.h"
 
+static bool ttp_vc_rx_opcode_is_valid (u8 vc, enum ttp_opcodes_enum op)
+{
+    if (!TTP_VC_ID__IS_VALID (vc) || !TTP_OPCODE_IS_VALID (op)) {
+        return false;
+    }
+    if (vc != TTP_VC__DATA) {
+        switch (op) {
+        case TTP_OP__TTP_PAYLOAD:
+        case TTP_OP__TTP_ACK:
+        case TTP_OP__TTP_NACK:
+        case TTP_OP__TTP_NACK_FULL:
+            return false;
+        default:
+            break;
+        }
+    }
+    return true;
+}
+
 
 #if (TTP_NOC_BUF_SIZE>1024)
 #error "TTPoE max-noc buffer is 1K"
@@ -372,9 +391,13 @@ int ttp_skb_dequ (void)
         TTP_DBG ("%s: INVALID vc-id:%d\n", __FUNCTION__, frh.ttp->conn_vc);
         goto drop;
     }
-    /* Current SW implementation does not implement spec-level VC request paths
-     * (REQ_HI/REQ_LO). Valid VC IDs are accepted and handled with the existing
-     * payload-oriented path only. */
+    if (!ttp_vc_rx_opcode_is_valid (frh.ttp->conn_vc, frh.ttp->conn_opcode)) {
+        TTP_DBG ("%s: unsupported opcode:%d on vc:%d\n", __FUNCTION__,
+                 frh.ttp->conn_opcode, frh.ttp->conn_vc);
+        goto drop;
+    }
+    /* VC is encoded in its own byte in the current spec revision. Only DATA VC
+     * is allowed to use the implemented payload/ack data path at the moment. */
     if (!ttp_evt_pget (&ev)) {
         goto drop;
     }
@@ -765,7 +788,8 @@ static int __init ttpoe_init (void)
     }
 
     if (!ttp_ipv4_pfxlen) {
-        me = ttp_tag_key_make (ttp_etype_dev.dev->dev_addr, 0, false, ttp_ipv4_encap);
+        me = ttp_tag_key_make (ttp_etype_dev.dev->dev_addr, TTP_VC__DATA, false,
+                               ttp_ipv4_encap);
         TTP_DBG ("%s: mac:%*phC tag:[0x%016llx] dev:%s\n", __FUNCTION__, ETH_ALEN,
                  ttp_etype_dev.dev->dev_addr, cpu_to_be64 (me), ttp_etype_dev.dev->name);
         /* save source info (mac and me) */

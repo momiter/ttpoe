@@ -53,6 +53,12 @@
 
 #define TTP_MAX_VCID      ((u8)2)     /* vc-id : [0, 1, 2] */
 
+enum ttp_vc_id_enum {
+    TTP_VC__REQ_LO = 0,
+    TTP_VC__REQ_HI = 1,
+    TTP_VC__DATA   = 2,
+};
+
 #define TTP_IPHDR_VER_V4     4
 #define TTP_IPHDR_VER_V6     6
 #define TTP_IPHDR_IHL        5

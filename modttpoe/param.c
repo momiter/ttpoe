@@ -239,7 +239,7 @@ static const struct kernel_param_ops ttp_param_vci_ops = {
 };
 
 module_param_cb (vci, &ttp_param_vci_ops, NULL, 0664);
-MODULE_PARM_DESC (vci, "      ttp conn-VCI (default=0, 1, 2)");
+MODULE_PARM_DESC (vci, "      ttp conn-VCI (default=2, valid: 0, 1, 2)");
 
 
 static int ttp_param_target_use_gw_set (const char *val, const struct kernel_param *kp)
@@ -361,7 +361,8 @@ static int ttp_param_scan_ipv4 (const struct net_device *dev)
             ttp_debug_source.ipa = ifa4->ifa_address;
             node = ifa4->ifa_address & ~mask; /* get host part */
             ttp_prepare_mac_with_oui (mac, TESLA_MAC_OUI, (u8 *)&node + 1);
-            ttp_debug_source.kid = ttp_tag_key_make (mac, 0, false, ttp_ipv4_encap);
+            ttp_debug_source.kid = ttp_tag_key_make (mac, TTP_VC__DATA, false,
+                                                     ttp_ipv4_encap);
             TTP_DBG ("%s: Source-IP:%pI4 mytag:[0x%016llx]\n", __FUNCTION__,
                      &ifa4->ifa_address, cpu_to_be64 (ttp_debug_source.kid));
             break;
@@ -684,6 +685,7 @@ static int ttp_param_debug_target_set (const char *val, const struct kernel_para
     if (0 == target) {
         ttp_debug_target_force_close (&ttp_debug_target);
         memset (&ttp_debug_target, 0, sizeof (ttp_debug_target));
+        ttp_debug_target.vc = TTP_VC__DATA;
         return 0;
     }
 

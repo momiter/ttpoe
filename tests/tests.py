@@ -49,7 +49,7 @@ peerDev  = ""
 selfLock = ""
 peerLock = ""
 verbose  = 0
-connVCI  = "0"
+connVCI  = "2"
 tagSeqi  = "0"
 nhmac    = ""
 ipv4Arg  = 0
@@ -200,7 +200,7 @@ def setUpModule():
         if options.vci:
             print (f"    Conn VCI: {connVCI} (override)")
         elif verbose >= 2:
-            print (f"    Conn VCI: 0 (default)")
+            print (f"    Conn VCI: 2 (default)")
     if options.self_dev:
         selfDev = options.self_dev
         if verbose:

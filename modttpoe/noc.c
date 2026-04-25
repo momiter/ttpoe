@@ -92,8 +92,25 @@ static struct class *ttp_class;
 static struct device *ttp_device;
 
 #define TTP_TARGET_INVALID  (-1)
-struct ttpoe_host_info ttp_debug_source;
-struct ttpoe_host_info ttp_debug_target;
+struct ttpoe_host_info ttp_debug_source = {
+    .vc = TTP_VC__DATA,
+};
+struct ttpoe_host_info ttp_debug_target = {
+    .vc = TTP_VC__DATA,
+};
+
+static bool ttp_vc_tx_event_is_valid(u8 vc, enum ttp_events_enum evnt)
+{
+    if (!TTP_VC_ID__IS_VALID(vc)) {
+        return false;
+    }
+
+    if (evnt == TTP_EV__TXQ__TTP_PAYLOAD && vc != TTP_VC__DATA) {
+        return false;
+    }
+
+    return true;
+}
 
 
 int ttpoe_host_resolve_target (u64 *kid, struct ttpoe_host_info *tg)
@@ -191,6 +208,11 @@ int ttpoe_submit_event (u8 *buf, struct sk_buff *skb, int nl,
         clt.gwf = 1;
         kid = clt._rkid;
         goto force;
+    }
+    if (!ttp_vc_tx_event_is_valid(tg->vc, evnt)) {
+        TTP_DBG("%s: unsupported tx event:%s on vc:%u\n", __FUNCTION__,
+                TTP_EVENT_NAME(evnt), tg->vc);
+        return -EPROTO;
     }
     if ((rv = ttpoe_host_resolve_target (&kid, tg))) {
         TTP_DBG ("%s: Error: Invalid target.vc: %*phC.%d gw:%d valid:%d\n",
