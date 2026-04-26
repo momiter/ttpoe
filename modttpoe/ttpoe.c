@@ -501,7 +501,7 @@ static bool ttp_skb_net_setup (struct sk_buff *skb, struct ttp_link_tag *lt, u16
         t3 = lt ? lt->tip : 0; /* do not assume ipv4 encap when lt == NULL */
     }
     frh.ttp->conn_opcode = op;
-    frh.ttp->conn_vc = lt ? lt->vci : TTP_MAX_VCID;
+    frh.ttp->conn_vc = lt ? lt->vci : TTP_VC__DATA;
 
     if (t3) { /* ip4 encap */
         frh.ttp->conn_version = 2;

@@ -71,7 +71,7 @@ static void ttp_sock_init_common(struct ttp_sock *tsk)
     memset(tsk->local_node, 0, sizeof(tsk->local_node));
     memset(tsk->peer_node, 0, sizeof(tsk->peer_node));
     tsk->ifindex = 0;
-    tsk->vci = 0;
+    tsk->vci = TTP_VC__DATA;
     tsk->kid = 0;
     tsk->state = TTP_SS_INIT;
     tsk->last_error = 0;
