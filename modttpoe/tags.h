@@ -221,11 +221,13 @@ struct ttp_link_tag {
     u32 base_seq;
     u32 next_seq;
     u32 retransmit_from;
+    u32 nack_recovery_seq;
     u32 close_tx_id;
     u32 close_rx_id;
     u32 close_nack_rx_id;
     u32 peer_close_tx_id;
     bool close_blocked;
+    bool nack_recovery_active;
     bool full_blocked;
     bool full_backoff_active;
     bool rx_full_blocked;
@@ -319,6 +321,33 @@ struct ttp_stats_all {
     atomic_t frm_ct;
     atomic_t pld_ct;
     atomic_t drp_ct;
+
+    atomic_t tx_payload_pkts;
+    atomic_t rx_payload_pkts;
+    atomic_t tx_retrans_pkts;
+    atomic64_t tx_payload_bytes;
+    atomic64_t rx_payload_bytes;
+    atomic64_t tx_retrans_bytes;
+
+    atomic_t tx_open;
+    atomic_t rx_open;
+    atomic_t tx_close;
+    atomic_t rx_close;
+    atomic_t tx_ack;
+    atomic_t rx_ack;
+    atomic_t tx_nack;
+    atomic_t rx_nack;
+    atomic_t tx_nack_full;
+    atomic_t rx_nack_full;
+    atomic_t tx_nack_nolink;
+    atomic_t rx_nack_nolink;
+
+    atomic_t rx_duplicate_payloads;
+    atomic_t rx_future_payloads;
+    atomic_t stale_nack_ignored;
+    atomic_t duplicate_nack_ignored;
+    atomic_t payload_timeouts;
+    atomic_t full_backoff_timeouts;
 
     u16  wkq_st;
     u16  wkq_sz;

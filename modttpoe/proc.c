@@ -64,6 +64,7 @@
 #include <linux/ip.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <net/addrconf.h>
 #include <net/ip.h>
 
@@ -316,6 +317,109 @@ static int ttpoe_proc_target_show (struct seq_file *seq, void *v)
     return 0;
 }
 
+static void ttpoe_proc_stats_reset (void)
+{
+#define TTP_STATS_ZERO(_v) atomic_set (&ttp_stats._v, 0)
+#define TTP_STATS64_ZERO(_v) atomic64_set (&ttp_stats._v, 0)
+    TTP_STATS_ZERO (tx_payload_pkts);
+    TTP_STATS_ZERO (rx_payload_pkts);
+    TTP_STATS_ZERO (tx_retrans_pkts);
+    TTP_STATS64_ZERO (tx_payload_bytes);
+    TTP_STATS64_ZERO (rx_payload_bytes);
+    TTP_STATS64_ZERO (tx_retrans_bytes);
+
+    TTP_STATS_ZERO (tx_open);
+    TTP_STATS_ZERO (rx_open);
+    TTP_STATS_ZERO (tx_close);
+    TTP_STATS_ZERO (rx_close);
+    TTP_STATS_ZERO (tx_ack);
+    TTP_STATS_ZERO (rx_ack);
+    TTP_STATS_ZERO (tx_nack);
+    TTP_STATS_ZERO (rx_nack);
+    TTP_STATS_ZERO (tx_nack_full);
+    TTP_STATS_ZERO (rx_nack_full);
+    TTP_STATS_ZERO (tx_nack_nolink);
+    TTP_STATS_ZERO (rx_nack_nolink);
+
+    TTP_STATS_ZERO (rx_duplicate_payloads);
+    TTP_STATS_ZERO (rx_future_payloads);
+    TTP_STATS_ZERO (stale_nack_ignored);
+    TTP_STATS_ZERO (duplicate_nack_ignored);
+    TTP_STATS_ZERO (payload_timeouts);
+    TTP_STATS_ZERO (full_backoff_timeouts);
+#undef TTP_STATS_ZERO
+#undef TTP_STATS64_ZERO
+}
+
+static int ttpoe_proc_stats_show (struct seq_file *seq, void *v)
+{
+    if (!seq) {
+        return 0;
+    }
+
+#define TTP_STATS_PRINT(_v) seq_printf (seq, #_v ": %d\n", atomic_read (&ttp_stats._v))
+#define TTP_STATS64_PRINT(_v) seq_printf (seq, #_v ": %lld\n", atomic64_read (&ttp_stats._v))
+    TTP_STATS_PRINT (tx_payload_pkts);
+    TTP_STATS_PRINT (rx_payload_pkts);
+    TTP_STATS_PRINT (tx_retrans_pkts);
+    TTP_STATS64_PRINT (tx_payload_bytes);
+    TTP_STATS64_PRINT (rx_payload_bytes);
+    TTP_STATS64_PRINT (tx_retrans_bytes);
+
+    TTP_STATS_PRINT (tx_open);
+    TTP_STATS_PRINT (rx_open);
+    TTP_STATS_PRINT (tx_close);
+    TTP_STATS_PRINT (rx_close);
+    TTP_STATS_PRINT (tx_ack);
+    TTP_STATS_PRINT (rx_ack);
+    TTP_STATS_PRINT (tx_nack);
+    TTP_STATS_PRINT (rx_nack);
+    TTP_STATS_PRINT (tx_nack_full);
+    TTP_STATS_PRINT (rx_nack_full);
+    TTP_STATS_PRINT (tx_nack_nolink);
+    TTP_STATS_PRINT (rx_nack_nolink);
+
+    TTP_STATS_PRINT (rx_duplicate_payloads);
+    TTP_STATS_PRINT (rx_future_payloads);
+    TTP_STATS_PRINT (stale_nack_ignored);
+    TTP_STATS_PRINT (duplicate_nack_ignored);
+    TTP_STATS_PRINT (payload_timeouts);
+    TTP_STATS_PRINT (full_backoff_timeouts);
+#undef TTP_STATS_PRINT
+#undef TTP_STATS64_PRINT
+
+    seq_printf (seq, "queue: %u\n", ttp_stats.queue);
+    seq_printf (seq, "nocq: %u\n", ttp_stats.nocq);
+    seq_printf (seq, "pool: %u\n", ttp_stats.pool);
+    seq_printf (seq, "skb_rx: %d\n", atomic_read (&ttp_stats.skb_rx));
+    seq_printf (seq, "skb_tx: %d\n", atomic_read (&ttp_stats.skb_tx));
+    seq_printf (seq, "frames: %d\n", atomic_read (&ttp_stats.frm_ct));
+    seq_printf (seq, "payload_delivered_legacy: %d\n", atomic_read (&ttp_stats.pld_ct));
+    seq_printf (seq, "drops_legacy: %d\n", atomic_read (&ttp_stats.drp_ct));
+
+    return 0;
+}
+
+static int ttpoe_proc_stats_open (struct inode *inode, struct file *file)
+{
+    return single_open (file, ttpoe_proc_stats_show, NULL);
+}
+
+static ssize_t ttpoe_proc_stats_write (struct file *file, const char __user *buf,
+                                       size_t count, loff_t *ppos)
+{
+    ttpoe_proc_stats_reset ();
+    return count;
+}
+
+static const struct proc_ops ttpoe_proc_stats_ops = {
+    .proc_open    = ttpoe_proc_stats_open,
+    .proc_read    = seq_read,
+    .proc_lseek   = seq_lseek,
+    .proc_release = single_release,
+    .proc_write   = ttpoe_proc_stats_write,
+};
+
 static struct proc_dir_entry *ttp_proc_dir;
 
 void ttpoe_proc_cleanup (void)
@@ -353,6 +457,10 @@ int __init ttpoe_proc_init (void)
     }
     if (!proc_create_single ("modttpoe/target", 0444,
                              init_net.proc_net, &ttpoe_proc_target_show)) {
+        goto out;
+    }
+    if (!proc_create ("modttpoe/stats", 0644,
+                      init_net.proc_net, &ttpoe_proc_stats_ops)) {
         goto out;
     }
 

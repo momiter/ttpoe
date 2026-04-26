@@ -410,11 +410,19 @@ static void ttp_noc_refresh_window_locked (struct ttp_link_tag *lt)
         lt->base_seq = lt->tx_seq_id;
         lt->next_seq = lt->tx_seq_id;
         lt->retransmit_from = 0;
+        lt->nack_recovery_seq = 0;
+        lt->nack_recovery_active = false;
         return;
     }
 
     lt->base_seq = ev->psi.txi_seq;
     lt->next_seq = lt->tx_seq_id;
+
+    if (lt->nack_recovery_active &&
+        ttp_seq_before_u32 (lt->nack_recovery_seq, lt->base_seq)) {
+        lt->nack_recovery_seq = 0;
+        lt->nack_recovery_active = false;
+    }
 
     if (lt->retransmit_from && ttp_seq_before_u32 (lt->retransmit_from, lt->base_seq)) {
         lt->retransmit_from = lt->base_seq;
@@ -535,6 +543,17 @@ bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
 
     mutex_lock (&ttp_global_root_head.event_mutx);
 
+    ttp_noc_refresh_window_locked (lt);
+    if (ttp_seq_before_u32 (seq, lt->base_seq)) {
+        atomic_inc (&ttp_stats.stale_nack_ignored);
+        goto out_unlock;
+    }
+    if (lt->nack_recovery_active &&
+        !ttp_seq_before_u32 (seq, lt->nack_recovery_seq)) {
+        atomic_inc (&ttp_stats.duplicate_nack_ignored);
+        goto out_unlock;
+    }
+
     list_for_each_entry (ev, &lt->ncq, elm) {
         if (ttp_seq_before_u32 (ev->psi.txi_seq, seq)) {
             continue;
@@ -549,7 +568,12 @@ bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
     if (marked && (!lt->retransmit_from || ttp_seq_before_u32 (seq, lt->retransmit_from))) {
         lt->retransmit_from = seq;
     }
+    if (marked) {
+        lt->nack_recovery_seq = seq;
+        lt->nack_recovery_active = true;
+    }
 
+out_unlock:
     mutex_unlock (&ttp_global_root_head.event_mutx);
     return marked;
 }
@@ -655,11 +679,13 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->base_seq    = 0;
     lt->next_seq    = 0;
     lt->retransmit_from = 0;
+    lt->nack_recovery_seq = 0;
     lt->close_tx_id = 0;
     lt->close_rx_id = 0;
     lt->close_nack_rx_id = 0;
     lt->peer_close_tx_id = 0;
     lt->close_blocked = false;
+    lt->nack_recovery_active = false;
     lt->full_blocked = false;
     lt->rx_full_blocked = false;
     lt->close_ack_pending = false;
@@ -1393,6 +1419,8 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
             }
             tev->tx_flags &= ~TTP_NOC_TXF_RETRANS;
             lt->txt++;
+            atomic_inc (&ttp_stats.tx_retrans_pkts);
+            atomic64_add (tev->psi.noc_len, &ttp_stats.tx_retrans_bytes);
             if (tev->psi.txi_seq == lt->base_seq) {
                 lt->try++;
             }
@@ -1510,6 +1538,7 @@ static void ttp_do_tag_work (struct work_struct *wk)
     if (do_tex) {
         if (lt->full_backoff_active) {
             lt->full_backoff_active = false;
+            atomic_inc (&ttp_stats.full_backoff_timeouts);
             ttp_noc_requ (lt);
             return;
         }
@@ -1517,6 +1546,7 @@ static void ttp_do_tag_work (struct work_struct *wk)
             ev->evt = TTP_EV__INQ__TIMEOUT;
             ev->kid = lt->_rkid;
             ttp_evt_enqu (ev);
+            atomic_inc (&ttp_stats.payload_timeouts);
             TTP_DB1 ("%s: wq: evnt: int__TIMEOUT\n", __FUNCTION__);
             TTP_EVLOG (ev, TTP_LG__TIMER_TIMEOUT, TTP_OP__invalid);
         }

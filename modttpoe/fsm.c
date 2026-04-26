@@ -690,6 +690,8 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             TTP_DB1 ("`-> %s: ACK payload seq-id:%d (exp:%d+1)\n",
                      __FUNCTION__, pif.txi_seq, lt->rx_seq_id);
             atomic_inc (&ttp_stats.pld_ct);
+            atomic_inc (&ttp_stats.rx_payload_pkts);
+            atomic64_add (pif.noc_len, &ttp_stats.rx_payload_bytes);
         }
         else if (pif.txi_seq && ttp_seq_before_u32 (pif.txi_seq, expected_seq)) {
             op = TTP_OP__TTP_ACK;
@@ -699,6 +701,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             TTP_DB1 ("`-> %s: ACK duplicate seq-id:%d (exp:%d+1)\n",
                      __FUNCTION__, pif.txi_seq, lt->rx_seq_id);
             atomic_inc (&ttp_stats.drp_ct);
+            atomic_inc (&ttp_stats.rx_duplicate_payloads);
         }
         else if (ttp_seq_before_u32 (lt->rx_seq_id, pif.txi_seq)) {
             if (lt->rx_full_blocked) {
@@ -714,6 +717,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             TTP_DB1 ("`-> %s: %s future seq-id:%d (exp:%d+1)\n",
                      __FUNCTION__, TTP_OPCODE_NAME (op), pif.txi_seq, lt->rx_seq_id);
             atomic_inc (&ttp_stats.drp_ct);
+            atomic_inc (&ttp_stats.rx_future_payloads);
         }
         else {
             op = TTP_OP__TTP_NACK;
@@ -1058,7 +1062,9 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK (struct ttp_fsm_event *qev)
         }
     }
 
-    ttp_noc_requ (lt);
+    if (marked) {
+        ttp_noc_requ (lt);
+    }
     return marked;
 }
 

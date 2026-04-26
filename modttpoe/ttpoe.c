@@ -120,6 +120,70 @@ u32   ttp_ipv4_pfxlen;
 int   ttp_ipv4_encap;
 u8    ttp_nhmac[ETH_ALEN] = {0x98, 0xed, 0x5c, 0xff, 0xff, 0xff};
 
+static void ttp_stats_count_tx_opcode (enum ttp_opcodes_enum op, u16 noc_len)
+{
+    switch (op) {
+    case TTP_OP__TTP_OPEN:
+        atomic_inc (&ttp_stats.tx_open);
+        break;
+    case TTP_OP__TTP_CLOSE:
+        atomic_inc (&ttp_stats.tx_close);
+        break;
+    case TTP_OP__TTP_PAYLOAD:
+        atomic_inc (&ttp_stats.tx_payload_pkts);
+        atomic64_add (noc_len, &ttp_stats.tx_payload_bytes);
+        break;
+    case TTP_OP__TTP_ACK:
+    case TTP_OP__TTP_OPEN_ACK:
+    case TTP_OP__TTP_CLOSE_ACK:
+        atomic_inc (&ttp_stats.tx_ack);
+        break;
+    case TTP_OP__TTP_NACK:
+    case TTP_OP__TTP_OPEN_NACK:
+    case TTP_OP__TTP_CLOSE_NACK:
+        atomic_inc (&ttp_stats.tx_nack);
+        break;
+    case TTP_OP__TTP_NACK_FULL:
+        atomic_inc (&ttp_stats.tx_nack_full);
+        break;
+    case TTP_OP__TTP_NACK_NOLINK:
+        atomic_inc (&ttp_stats.tx_nack_nolink);
+        break;
+    default:
+        break;
+    }
+}
+
+static void ttp_stats_count_rx_opcode (enum ttp_opcodes_enum op)
+{
+    switch (op) {
+    case TTP_OP__TTP_OPEN:
+        atomic_inc (&ttp_stats.rx_open);
+        break;
+    case TTP_OP__TTP_CLOSE:
+        atomic_inc (&ttp_stats.rx_close);
+        break;
+    case TTP_OP__TTP_ACK:
+    case TTP_OP__TTP_OPEN_ACK:
+    case TTP_OP__TTP_CLOSE_ACK:
+        atomic_inc (&ttp_stats.rx_ack);
+        break;
+    case TTP_OP__TTP_NACK:
+    case TTP_OP__TTP_OPEN_NACK:
+    case TTP_OP__TTP_CLOSE_NACK:
+        atomic_inc (&ttp_stats.rx_nack);
+        break;
+    case TTP_OP__TTP_NACK_FULL:
+        atomic_inc (&ttp_stats.rx_nack_full);
+        break;
+    case TTP_OP__TTP_NACK_NOLINK:
+        atomic_inc (&ttp_stats.rx_nack_nolink);
+        break;
+    default:
+        break;
+    }
+}
+
 
 static int ttpoe_skb_recv_func (struct sk_buff *, struct net_device *dev,
                                 struct packet_type *pt, struct net_device *odev);
@@ -176,6 +240,7 @@ u8 *ttp_skb_aloc (struct sk_buff **skbp, int nl)
 void ttp_skb_xmit (struct sk_buff *skb)
 {
     struct ttp_frame_hdr frh;
+    struct ttp_pkt_info pif = {0};
 
     if (!skb) {
         return;
@@ -185,7 +250,8 @@ void ttp_skb_xmit (struct sk_buff *skb)
         goto drop;
     }
 
-    ttp_skb_pars (skb, &frh, NULL);
+    ttp_skb_pars (skb, &frh, &pif);
+    ttp_stats_count_tx_opcode (frh.ttp->conn_opcode, pif.noc_len);
     TTP_DBG ("%s: <<- Tx frame: len:%d dev:%s\n", __FUNCTION__, skb->len, skb->dev->name);
     ttpoe_parse_print (skb, TTP_TX, 1);
     atomic_inc (&ttp_stats.skb_tx);
@@ -404,6 +470,7 @@ int ttp_skb_dequ (void)
 
     atomic_inc (&ttp_stats.frm_ct);
     atomic_inc (&ttp_stats.skb_ct);
+    ttp_stats_count_rx_opcode (frh.ttp->conn_opcode);
 
     ev->rsk = skb;
     ev->psi = pif;
