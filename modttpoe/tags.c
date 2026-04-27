@@ -501,6 +501,7 @@ bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced)
         lt->full_blocked = false;
         lt->full_backoff_active = false;
         lt->full_retry = 0;
+        lt->local_congestion = 0;
     }
     if (ttp_noc_close_replay_ready_locked (lt)) {
         lt->close_blocked = false;
@@ -708,10 +709,14 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->peer_close_tx_id = 0;
     lt->local_epoch = 0;
     lt->peer_epoch = 0;
+    lt->local_congestion = 0;
+    lt->peer_congestion = 0;
+    lt->rx_full_level = 0;
     lt->close_blocked = false;
     lt->nack_recovery_active = false;
     lt->full_blocked = false;
     lt->rx_full_blocked = false;
+    lt->congestion_echo_pending = false;
     lt->close_ack_pending = false;
     lt->close_ack_sent = false;
     lt->open_tx_pending = false;

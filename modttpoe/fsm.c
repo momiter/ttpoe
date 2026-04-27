@@ -678,11 +678,16 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             }
             if (rv) {
                 lt->rx_full_blocked = true;
+                if (lt->rx_full_level < 255) {
+                    lt->rx_full_level++;
+                }
+                lt->local_congestion = lt->rx_full_level;
                 op = TTP_OP__TTP_NACK_FULL;
                 goto send;
             }
 
             lt->rx_full_blocked = false;
+            lt->rx_full_level = 0;
             op = TTP_OP__TTP_ACK;
             lt->rx_seq_id++;    /* update tag-rx-seq-id */
             ack_seq = pif.txi_seq;
@@ -708,6 +713,10 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             if (lt->rx_full_blocked) {
                 op = TTP_OP__TTP_NACK_FULL;
                 ack_seq = lt->rx_seq_id;
+                if (lt->rx_full_level < 255) {
+                    lt->rx_full_level++;
+                }
+                lt->local_congestion = lt->rx_full_level;
             }
             else {
                 op = TTP_OP__TTP_NACK;
@@ -1221,6 +1230,10 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_FULL (struct ttp_fsm_event *qev)
     }
 
     lt->full_blocked = true;
+    if (qev->psi.congestion && qev->psi.congestion > lt->full_retry) {
+        lt->full_retry = min_t (u16, qev->psi.congestion, TTP_FULL_MAX_RETRY - 1);
+    }
+    lt->peer_congestion = qev->psi.congestion;
     if (lt->full_retry >= TTP_FULL_MAX_RETRY) {
         int dropped = lt->tct;
 
@@ -1241,9 +1254,11 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_FULL (struct ttp_fsm_event *qev)
         lt->full_blocked = false;
         lt->full_backoff_active = false;
         lt->full_retry = 0;
+        lt->local_congestion = 0;
     }
 
     if (marked) {
+        lt->local_congestion = min_t (u16, max_t (u16, lt->full_retry, 1), 255);
         ttp_noc_start_full_backoff (lt, qev);
         lt->full_retry++;
     }
@@ -1251,6 +1266,7 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_FULL (struct ttp_fsm_event *qev)
         lt->full_blocked = false;
         lt->full_backoff_active = false;
         lt->full_retry = 0;
+        lt->local_congestion = 0;
     }
 
     return true;

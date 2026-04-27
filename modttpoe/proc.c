@@ -349,6 +349,10 @@ static void ttpoe_proc_stats_reset (void)
     TTP_STATS_ZERO (full_backoff_timeouts);
     TTP_STATS_ZERO (epoch_mismatch_drops);
     TTP_STATS_ZERO (header_invalid_drops);
+    TTP_STATS_ZERO (tx_congestion_reduced);
+    TTP_STATS_ZERO (rx_congestion_reduced);
+    TTP_STATS_ZERO (tx_congestion_echo);
+    TTP_STATS_ZERO (rx_congestion_echo);
 #undef TTP_STATS_ZERO
 #undef TTP_STATS64_ZERO
 }
@@ -389,6 +393,10 @@ static int ttpoe_proc_stats_show (struct seq_file *seq, void *v)
     TTP_STATS_PRINT (full_backoff_timeouts);
     TTP_STATS_PRINT (epoch_mismatch_drops);
     TTP_STATS_PRINT (header_invalid_drops);
+    TTP_STATS_PRINT (tx_congestion_reduced);
+    TTP_STATS_PRINT (rx_congestion_reduced);
+    TTP_STATS_PRINT (tx_congestion_echo);
+    TTP_STATS_PRINT (rx_congestion_echo);
 #undef TTP_STATS_PRINT
 #undef TTP_STATS64_PRINT
 

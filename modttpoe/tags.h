@@ -228,11 +228,15 @@ struct ttp_link_tag {
     u32 peer_close_tx_id;
     u16 local_epoch;
     u16 peer_epoch;
+    u8  local_congestion;
+    u8  peer_congestion;
+    u8  rx_full_level;
     bool close_blocked;
     bool nack_recovery_active;
     bool full_blocked;
     bool full_backoff_active;
     bool rx_full_blocked;
+    bool congestion_echo_pending;
     bool close_ack_pending;
     bool close_ack_sent;
     bool open_tx_pending;
@@ -353,6 +357,10 @@ struct ttp_stats_all {
     atomic_t full_backoff_timeouts;
     atomic_t epoch_mismatch_drops;
     atomic_t header_invalid_drops;
+    atomic_t tx_congestion_reduced;
+    atomic_t rx_congestion_reduced;
+    atomic_t tx_congestion_echo;
+    atomic_t rx_congestion_echo;
 
     u16  wkq_st;
     u16  wkq_sz;

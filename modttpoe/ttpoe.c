@@ -476,10 +476,89 @@ u16 ttp_skb_pars (const struct sk_buff *skb, struct ttp_frame_hdr *fh,
     fh->dat = (struct ttp_ttpoe_noc_dat *)(pkp + ETH_HLEN + pi->dat_off);
 
     pi->epoch = ntohs (fh->ttp->conn_epoch);
+    pi->congestion = fh->ttp->conn_congestion;
+    pi->congn_reduced = !!fh->ttp->conn_congn_reduced;
+    pi->congn_reduced_echo = !!fh->ttp->conn_congn_reduced_echo;
     pi->rxi_seq = ntohl (fh->ttp->conn_rx_seq);
     pi->txi_seq = ntohl (fh->ttp->conn_tx_seq);
 
     return ntohs (skb->protocol);
+}
+
+static u8 ttp_full_congestion_level (const struct ttp_link_tag *lt)
+{
+    u16 level;
+
+    if (!lt) {
+        return 0;
+    }
+
+    level = max_t (u16, lt->full_retry, lt->rx_full_level);
+    level = max_t (u16, level, lt->local_congestion);
+    if ((lt->full_blocked || lt->full_backoff_active || lt->rx_full_blocked) && !level) {
+        level = 1;
+    }
+    return (u8)min_t (u16, level, 255);
+}
+
+static void ttp_skb_apply_congestion (struct ttp_transport_hdr *ttp,
+                                      struct ttp_link_tag *lt,
+                                      enum ttp_opcodes_enum op)
+{
+    bool cr = false;
+    bool ce = false;
+    u8 congestion = 0;
+
+    if (!ttp) {
+        return;
+    }
+
+    ttp->conn_congestion = 0;
+    ttp->conn_congn_reduced = 0;
+    ttp->conn_congn_reduced_echo = 0;
+
+    if (!lt || !lt->valid) {
+        return;
+    }
+
+    if (lt->full_blocked || lt->full_backoff_active ||
+        (op == TTP_OP__TTP_NACK_FULL && lt->rx_full_blocked)) {
+        cr = true;
+        congestion = max_t (u8, congestion, ttp_full_congestion_level (lt));
+    }
+
+    if (lt->congestion_echo_pending) {
+        ce = true;
+        congestion = max_t (u8, congestion, lt->peer_congestion);
+        lt->congestion_echo_pending = false;
+    }
+
+    ttp->conn_congestion = congestion;
+    ttp->conn_congn_reduced = cr ? 1 : 0;
+    ttp->conn_congn_reduced_echo = ce ? 1 : 0;
+    if (cr) {
+        atomic_inc (&ttp_stats.tx_congestion_reduced);
+    }
+    if (ce) {
+        atomic_inc (&ttp_stats.tx_congestion_echo);
+    }
+}
+
+static void ttp_tag_note_congestion (struct ttp_link_tag *lt,
+                                     const struct ttp_pkt_info *pif)
+{
+    if (!lt || !pif) {
+        return;
+    }
+
+    if (pif->congn_reduced) {
+        lt->peer_congestion = pif->congestion;
+        lt->congestion_echo_pending = true;
+        atomic_inc (&ttp_stats.rx_congestion_reduced);
+    }
+    if (pif->congn_reduced_echo) {
+        atomic_inc (&ttp_stats.rx_congestion_echo);
+    }
 }
 
 
@@ -601,6 +680,7 @@ int ttp_skb_dequ (void)
         ttp_evt_pput (ev);
         return 0;
     }
+    ttp_tag_note_congestion (lt, &pif);
 
     ttp_evt_enqu (ev);
     TTP_EVLOG (ev, TTP_LG__PKT_RX, frh.ttp->conn_opcode);
@@ -675,6 +755,12 @@ static bool ttp_skb_net_setup (struct sk_buff *skb, struct ttp_link_tag *lt, u16
     frh.ttp->conn_opcode = op;
     frh.ttp->conn_vc = lt ? lt->vci : TTP_VC__DATA;
     frh.ttp->conn_epoch = htons (lt && lt->valid ? lt->local_epoch : 0);
+    frh.ttp->conn_congestion = 0;
+    frh.ttp->conn_congn_reduced = 0;
+    frh.ttp->conn_congn_reduced_echo = 0;
+    frh.ttp->conn_res1 = 0;
+    frh.ttp->conn_res2 = 0;
+    ttp_skb_apply_congestion (frh.ttp, lt, op);
 
     if (t3) { /* ip4 encap */
         frh.ttp->conn_version = 2;

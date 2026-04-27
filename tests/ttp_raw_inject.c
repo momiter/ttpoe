@@ -61,6 +61,9 @@ struct inject_opts {
     int vc;
     int res_op;
     int extension;
+    int congestion;
+    bool cr;
+    bool ce;
     uint16_t epoch;
     uint32_t tx_id;
     uint32_t rx_id;
@@ -86,6 +89,9 @@ static void usage(const char *prog)
         "  --vc N                 VC id, default 2 (DATA VC)\n"
         "  --res-op N             Reserved opcode bits, default 0\n"
         "  --extension N          Transport extension byte, default 0\n"
+        "  --congestion N         Congestion byte, default 0\n"
+        "  --cr                   Set congestion-reduced bit\n"
+        "  --ce                   Set congestion-reduced-echo bit\n"
         "  --epoch N              16-bit epoch value, default 0\n"
         "  --tx-id N              TTP TxID, default 0\n"
         "  --rx-id N              TTP RxID, default 0\n"
@@ -353,8 +359,9 @@ static size_t build_frame(const struct inject_opts *opts, uint8_t *frame)
     p[2] = 0; /* legacy conn_tx */
     p[3] = 0; /* legacy conn_rx */
     put_be16(p + 4, opts->epoch);
-    p[6] = 0; /* congestion */
-    put_be16(p + 7, 0); /* reserved/version bits */
+    p[6] = (uint8_t)(opts->congestion & 0xff);
+    p[7] = (opts->ce ? 0x01 : 0x00) | (opts->cr ? 0x02 : 0x00);
+    p[8] = 0; /* reserved/version bits */
     p[9] = (uint8_t)(opts->extension & 0xff);
     put_be32(p + 10, opts->tx_id);
     put_be32(p + 14, opts->rx_id);
@@ -496,6 +503,16 @@ int main(int argc, char **argv)
                 fprintf(stderr, "invalid --extension\n");
                 return 2;
             }
+        } else if (!strcmp(argv[i], "--congestion") && i + 1 < argc) {
+            rc = parse_int(argv[++i], &opts.congestion);
+            if (rc || opts.congestion < 0 || opts.congestion > 255) {
+                fprintf(stderr, "invalid --congestion\n");
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "--cr")) {
+            opts.cr = true;
+        } else if (!strcmp(argv[i], "--ce")) {
+            opts.ce = true;
         } else if (!strcmp(argv[i], "--epoch") && i + 1 < argc) {
             uint32_t tmp;
 
@@ -599,9 +616,10 @@ int main(int argc, char **argv)
 
     frame_len = build_frame(&opts, frame);
 
-    printf("dev=%s ifindex=%d opcode=%d vc=%d res_op=%d extension=%d epoch=%u tx=%u rx=%u noc_len=%zu frame_len=%zu\n",
+    printf("dev=%s ifindex=%d opcode=%d vc=%d res_op=%d extension=%d congestion=%d cr=%d ce=%d epoch=%u tx=%u rx=%u noc_len=%zu frame_len=%zu\n",
            opts.ifname, ifindex, opts.opcode, opts.vc, opts.res_op, opts.extension,
-           opts.epoch, opts.tx_id, opts.rx_id, opts.payload_len, frame_len);
+           opts.congestion, opts.cr, opts.ce, opts.epoch, opts.tx_id, opts.rx_id,
+           opts.payload_len, frame_len);
     printf("src=%02x:%02x:%02x:%02x:%02x:%02x dst=%02x:%02x:%02x:%02x:%02x:%02x\n",
            opts.src_mac[0], opts.src_mac[1], opts.src_mac[2],
            opts.src_mac[3], opts.src_mac[4], opts.src_mac[5],

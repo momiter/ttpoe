@@ -292,6 +292,9 @@ struct ttp_pkt_info {
     u16 noc_off;
     u16 dat_off;
     u16 epoch;
+    u8  congestion;
+    bool congn_reduced;
+    bool congn_reduced_echo;
 
     u32 rxi_seq;
     u32 txi_seq;
