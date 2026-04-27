@@ -883,18 +883,85 @@ static bool ttp_fsm_rs__PAYLOAD2 (struct ttp_fsm_event *ev)
 
 
 TTP_NOINLINE
+static bool ttp_fsm_rs__control (struct ttp_fsm_event *ev,
+                                 enum ttp_response_enum rs,
+                                 const char *effect)
+{
+    TTP_DB1 ("%s: 0x%016llx.%d %s: %s\n", __FUNCTION__,
+             cpu_to_be64 (ev->kid), ev->idx, TTP_RESPONSE_NAME (rs), effect);
+    return true;
+}
+
+
+static void ttp_fsm_abort_link (struct ttp_fsm_event *ev, int err)
+{
+    int dropped;
+    struct ttp_link_tag *lt;
+
+    if (!(lt = ttp_rbtree_tag_get (ev->kid))) {
+        return;
+    }
+
+    ttpoe_socket_link_error (lt->_rkid, err);
+    if (timer_pending (&lt->tmr)) {
+        del_timer (&lt->tmr);
+    }
+
+    dropped = lt->tct;
+    while (ttp_noc_dequ (lt)) {
+        ;
+    }
+    if (dropped) {
+        ttp_stats.nocq -= dropped;
+    }
+}
+
+
+TTP_NOINLINE
 static bool ttp_fsm_rs__DROP (struct ttp_fsm_event *ev)
 {
-    TTP_DB1 ("%s: 0x%016llx.%d\n", __FUNCTION__, cpu_to_be64 (ev->kid), ev->idx);
-    return true;
+    return ttp_fsm_rs__control (ev, TTP_RS__DROP, "consume event without wire response");
 }
 
 
 TTP_NOINLINE
 static bool ttp_fsm_rs__INTERRUPT (struct ttp_fsm_event *ev)
 {
-    TTP_DB1 ("%s: 0x%016llx.%d\n", __FUNCTION__, cpu_to_be64 (ev->kid), ev->idx);
-    return true;
+    ttp_fsm_abort_link (ev, EHOSTUNREACH);
+    return ttp_fsm_rs__control (ev, TTP_RS__INTERRUPT,
+                                "surface link/protocol interrupt without wire response");
+}
+
+
+TTP_NOINLINE
+static bool ttp_fsm_rs__ILLEGAL (struct ttp_fsm_event *ev)
+{
+    return ttp_fsm_rs__control (ev, TTP_RS__ILLEGAL,
+                                "invalid event/state combination, no wire response");
+}
+
+
+TTP_NOINLINE
+static bool ttp_fsm_rs__STALL (struct ttp_fsm_event *ev)
+{
+    return ttp_fsm_rs__control (ev, TTP_RS__STALL,
+                                "transient stall, no wire response");
+}
+
+
+TTP_NOINLINE
+static bool ttp_fsm_rs__NOC_FAIL (struct ttp_fsm_event *ev)
+{
+    return ttp_fsm_rs__control (ev, TTP_RS__NOC_FAIL,
+                                "fatal NOC failure, terminal handling follows");
+}
+
+
+TTP_NOINLINE
+static bool ttp_fsm_rs__NOC_END (struct ttp_fsm_event *ev)
+{
+    return ttp_fsm_rs__control (ev, TTP_RS__NOC_END,
+                                "graceful NOC close complete, terminal handling follows");
 }
 
 
@@ -913,8 +980,12 @@ ttp_fsm_fn ttp_fsm_response_fn[TTP_RS__NUM_EV] =
     [TTP_RS__ACK]          = ttp_fsm_rs__ACK,
     [TTP_RS__NACK]         = ttp_fsm_rs__NACK,
     [TTP_RS__NACK_NOLINK]  = ttp_fsm_rs__NACK_NOLINK,
-    [TTP_RS__DROP]         = ttp_fsm_rs__DROP,
+    [TTP_RS__NOC_FAIL]     = ttp_fsm_rs__NOC_FAIL,
+    [TTP_RS__NOC_END]      = ttp_fsm_rs__NOC_END,
+    [TTP_RS__ILLEGAL]      = ttp_fsm_rs__ILLEGAL,
     [TTP_RS__INTERRUPT]    = ttp_fsm_rs__INTERRUPT,
+    [TTP_RS__DROP]         = ttp_fsm_rs__DROP,
+    [TTP_RS__STALL]        = ttp_fsm_rs__STALL,
 };
 
 
@@ -1200,7 +1271,7 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_NOLINK (struct ttp_fsm_event *qev)
     if (TTP_ST__OPEN == lt->state) {
         qev->fsm_override = 1;
         qev->fsm_response = TTP_RS__INTERRUPT;
-        qev->fsm_next_state = TTP_ST__stay;
+        qev->fsm_next_state = TTP_ST__CLOSED;
         return true;
     }
 
@@ -1277,6 +1348,7 @@ ttp_fsm_fn ttp_fsm_event_handle_fn[TTP_EV__NUM_EV] =
 #define         rs_OPEN__ns_stay        { .response = TTP_RS__OPEN        ,  .next_state = TTP_ST__stay       , }
 #define      rs_ILLEGAL__ns_stay        { .response = TTP_RS__ILLEGAL     ,  .next_state = TTP_ST__stay       , }
 #define    rs_INTERRUPT__ns_stay        { .response = TTP_RS__INTERRUPT   ,  .next_state = TTP_ST__stay       , }
+#define  rs_INTERRUPT__ns_CLOSED        { .response = TTP_RS__INTERRUPT   ,  .next_state = TTP_ST__CLOSED     , }
 #define         rs_DROP__ns_stay        { .response = TTP_RS__DROP        ,  .next_state = TTP_ST__stay       , }
 #define        rs_CLOSE__ns_stay        { .response = TTP_RS__CLOSE       ,  .next_state = TTP_ST__stay       , }
 #define          rs_ACK__ns_stay        { .response = TTP_RS__ACK         ,  .next_state = TTP_ST__stay       , }
@@ -1324,7 +1396,7 @@ struct ttp_fsm_state_var ttp_fsm_table[TTP_EV__NUM_EV][TTP_ST__NUM_ST] = /*     
     [TTP_EV__RXQ__TTP_ACK]         = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_DROP__ns_stay        ,         rs_DROP__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_NACK]        = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_DROP__ns_stay        ,         rs_DROP__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_NACK_FULL]   = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_DROP__ns_stay        ,         rs_DROP__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
-    [TTP_EV__RXQ__TTP_NACK_NOLINK] = { _no_rs__no_ns_  ,         rs_STALL__ns_stay        ,       rs_STALL__ns_stay        ,        rs_STALL__ns_stay    ,   rs_INTERRUPT__ns_stay     ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
+    [TTP_EV__RXQ__TTP_NACK_NOLINK] = { _no_rs__no_ns_  ,         rs_STALL__ns_stay        ,       rs_STALL__ns_stay        ,        rs_STALL__ns_stay    , rs_INTERRUPT__ns_CLOSED   ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_UNXP_PAYLD]  = { _no_rs__no_ns_  ,   rs_NACK_NOLINK__ns_stay        ,        rs_none__ns_stay        ,         rs_NACK__ns_stay    ,        rs_NACK__ns_stay        ,         rs_NACK__ns_stay       ,       rs_ILLEGAL__ns_stay       , },
     [TTP_EV__AKQ__OPEN_ACK]        = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__AKQ__OPEN_NACK]       = { _no_rs__no_ns_  ,     rs_OPEN_NACK__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },

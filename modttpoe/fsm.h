@@ -229,6 +229,23 @@ enum ttp_response_enum {
 
     TTP_RS__NACK_NOLINK,
 
+    /*
+     * Internal, no-wire responses. These names are used by the FSM table to
+     * document why no TTP packet is emitted:
+     *
+     * NOC_FAIL  - fatal local NOC/protocol failure; no packet is sent. The
+     *             table must pair it with a terminal state, and socket/error
+     *             propagation happens after the FSM response phase.
+     * NOC_END   - graceful local NOC close completion; no packet is sent. The
+     *             table must pair it with the close terminal state.
+     * ILLEGAL   - impossible event/state combination; no packet, no state
+     *             mutation beyond the table entry.
+     * INTERRUPT - peer/link interrupt indication; no packet. The response path
+     *             aborts local pending work and the table should move to CLOSED.
+     * DROP      - silently consume a stale or irrelevant event.
+     * STALL     - temporarily unable to progress; keep the event consumed and
+     *             rely on later input/timer events to make progress.
+     */
     TTP_RS__NOC_FAIL,
     TTP_RS__NOC_END,
 

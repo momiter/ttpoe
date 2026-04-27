@@ -352,6 +352,7 @@ struct ttp_stats_all {
     atomic_t payload_timeouts;
     atomic_t full_backoff_timeouts;
     atomic_t epoch_mismatch_drops;
+    atomic_t header_invalid_drops;
 
     u16  wkq_st;
     u16  wkq_sz;

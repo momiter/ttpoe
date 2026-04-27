@@ -106,6 +106,93 @@ static bool ttp_vc_rx_opcode_is_valid (u8 vc, enum ttp_opcodes_enum op)
     return true;
 }
 
+static bool ttp_ext_type_is_supported (u8 ext)
+{
+    return ext == TTP_ET__BASE || ext == TTP_ET__PAYLOAD_OFFSET;
+}
+
+static bool ttp_header_validate (struct ttp_frame_hdr *frh,
+                                 struct ttp_pkt_info *pif, bool t3)
+{
+    u8 op;
+    u8 vc;
+    u8 ext;
+
+    if (!frh || !frh->ttp || !pif) {
+        return false;
+    }
+
+    op = frh->ttp->conn_opcode;
+    vc = frh->ttp->conn_vc;
+    ext = frh->ttp->conn_extension;
+
+    if (!TTP_OPCODE_IS_VALID (op)) {
+        TTP_DBG ("%s: invalid opcode:%u\n", __FUNCTION__, op);
+        return false;
+    }
+    if (frh->ttp->res_opcode) {
+        TTP_DBG ("%s: invalid res-op:%u opcode:%s\n", __FUNCTION__,
+                 frh->ttp->res_opcode, TTP_OPCODE_NAME (op));
+        return false;
+    }
+    if (!TTP_VC_ID__IS_VALID (vc)) {
+        TTP_DBG ("%s: invalid vc-id:%u opcode:%s\n", __FUNCTION__,
+                 vc, TTP_OPCODE_NAME (op));
+        return false;
+    }
+    if (!ttp_vc_rx_opcode_is_valid (vc, op)) {
+        TTP_DBG ("%s: unsupported opcode:%s on vc:%u\n", __FUNCTION__,
+                 TTP_OPCODE_NAME (op), vc);
+        return false;
+    }
+
+    if (frh->ttp->conn_reserved0) {
+        TTP_DBG ("%s: non-zero reserved0:0x%04x opcode:%s\n", __FUNCTION__,
+                 ntohs (frh->ttp->conn_reserved0), TTP_OPCODE_NAME (op));
+        return false;
+    }
+    if (frh->ttp->conn_version != 0 && frh->ttp->conn_version != 2) {
+        TTP_DBG ("%s: unsupported version:%u opcode:%s\n", __FUNCTION__,
+                 frh->ttp->conn_version, TTP_OPCODE_NAME (op));
+        return false;
+    }
+    if (t3 && frh->ttp->conn_version != 2) {
+        TTP_DBG ("%s: ipv4 frame version:%u expected:2 opcode:%s\n", __FUNCTION__,
+                 frh->ttp->conn_version, TTP_OPCODE_NAME (op));
+        return false;
+    }
+    if (!t3 && frh->ttp->conn_version != 0) {
+        TTP_DBG ("%s: raw frame version:%u expected:0 opcode:%s\n", __FUNCTION__,
+                 frh->ttp->conn_version, TTP_OPCODE_NAME (op));
+        return false;
+    }
+    if (frh->ttp->conn_res1 || frh->ttp->conn_res2) {
+        TTP_DBG ("%s: non-zero reserved bits r1:%u r2:%u opcode:%s\n",
+                 __FUNCTION__, frh->ttp->conn_res1, frh->ttp->conn_res2,
+                 TTP_OPCODE_NAME (op));
+        return false;
+    }
+    if (!ttp_ext_type_is_supported (ext)) {
+        TTP_DBG ("%s: unsupported extension:0x%02x opcode:%s\n", __FUNCTION__,
+                 ext, TTP_OPCODE_NAME (op));
+        return false;
+    }
+    if (ext == TTP_ET__PAYLOAD_OFFSET) {
+        if (op != TTP_OP__TTP_PAYLOAD) {
+            TTP_DBG ("%s: payload extension on opcode:%s\n", __FUNCTION__,
+                     TTP_OPCODE_NAME (op));
+            return false;
+        }
+        if (pif->noc_len < sizeof (struct ttp_ttpoe_noc_hdr)) {
+            TTP_DBG ("%s: payload extension without noc header len:%u\n",
+                     __FUNCTION__, pif->noc_len);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 
 #if (TTP_NOC_BUF_SIZE>1024)
 #error "TTPoE max-noc buffer is 1K"
@@ -464,17 +551,8 @@ int ttp_skb_dequ (void)
         goto drop;
     }
 
-    if (!TTP_OPCODE_IS_VALID (frh.ttp->conn_opcode)) {
-        TTP_DBG ("%s: INVALID opcode:%d\n", __FUNCTION__, frh.ttp->conn_opcode);
-        goto drop;
-    }
-    if (!TTP_VC_ID__IS_VALID (frh.ttp->conn_vc)) {
-        TTP_DBG ("%s: INVALID vc-id:%d\n", __FUNCTION__, frh.ttp->conn_vc);
-        goto drop;
-    }
-    if (!ttp_vc_rx_opcode_is_valid (frh.ttp->conn_vc, frh.ttp->conn_opcode)) {
-        TTP_DBG ("%s: unsupported opcode:%d on vc:%d\n", __FUNCTION__,
-                 frh.ttp->conn_opcode, frh.ttp->conn_vc);
+    if (!ttp_header_validate (&frh, &pif, t3)) {
+        atomic_inc (&ttp_stats.header_invalid_drops);
         goto drop;
     }
     /* VC is encoded in its own byte in the current spec revision. Only DATA VC

@@ -59,6 +59,8 @@ struct inject_opts {
     bool dst_mac_set;
     int opcode;
     int vc;
+    int res_op;
+    int extension;
     uint16_t epoch;
     uint32_t tx_id;
     uint32_t rx_id;
@@ -82,6 +84,8 @@ static void usage(const char *prog)
         "  --opcode OP            Name or number: open, open-ack, close, payload, ack,\n"
         "                         nack, nack-full, nack-nolink, close-ack, close-nack\n"
         "  --vc N                 VC id, default 2 (DATA VC)\n"
+        "  --res-op N             Reserved opcode bits, default 0\n"
+        "  --extension N          Transport extension byte, default 0\n"
         "  --epoch N              16-bit epoch value, default 0\n"
         "  --tx-id N              TTP TxID, default 0\n"
         "  --rx-id N              TTP RxID, default 0\n"
@@ -344,14 +348,14 @@ static size_t build_frame(const struct inject_opts *opts, uint8_t *frame)
     put_be16(p, tsh_len);
     p += sizeof(uint16_t);
 
-    p[0] = (uint8_t)(opts->opcode & 0x3f);
+    p[0] = (uint8_t)((opts->opcode & 0x3f) | ((opts->res_op & 0x3) << 6));
     p[1] = (uint8_t)(opts->vc & 0xff);
     p[2] = 0; /* legacy conn_tx */
     p[3] = 0; /* legacy conn_rx */
     put_be16(p + 4, opts->epoch);
     p[6] = 0; /* congestion */
     put_be16(p + 7, 0); /* reserved/version bits */
-    p[9] = 0; /* extension count/type */
+    p[9] = (uint8_t)(opts->extension & 0xff);
     put_be32(p + 10, opts->tx_id);
     put_be32(p + 14, opts->rx_id);
     p += TTP_HDR_LEN;
@@ -480,6 +484,18 @@ int main(int argc, char **argv)
                 fprintf(stderr, "invalid --vc\n");
                 return 2;
             }
+        } else if (!strcmp(argv[i], "--res-op") && i + 1 < argc) {
+            rc = parse_int(argv[++i], &opts.res_op);
+            if (rc || opts.res_op < 0 || opts.res_op > 3) {
+                fprintf(stderr, "invalid --res-op\n");
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "--extension") && i + 1 < argc) {
+            rc = parse_int(argv[++i], &opts.extension);
+            if (rc || opts.extension < 0 || opts.extension > 255) {
+                fprintf(stderr, "invalid --extension\n");
+                return 2;
+            }
         } else if (!strcmp(argv[i], "--epoch") && i + 1 < argc) {
             uint32_t tmp;
 
@@ -583,9 +599,9 @@ int main(int argc, char **argv)
 
     frame_len = build_frame(&opts, frame);
 
-    printf("dev=%s ifindex=%d opcode=%d vc=%d epoch=%u tx=%u rx=%u noc_len=%zu frame_len=%zu\n",
-           opts.ifname, ifindex, opts.opcode, opts.vc, opts.epoch, opts.tx_id, opts.rx_id,
-           opts.payload_len, frame_len);
+    printf("dev=%s ifindex=%d opcode=%d vc=%d res_op=%d extension=%d epoch=%u tx=%u rx=%u noc_len=%zu frame_len=%zu\n",
+           opts.ifname, ifindex, opts.opcode, opts.vc, opts.res_op, opts.extension,
+           opts.epoch, opts.tx_id, opts.rx_id, opts.payload_len, frame_len);
     printf("src=%02x:%02x:%02x:%02x:%02x:%02x dst=%02x:%02x:%02x:%02x:%02x:%02x\n",
            opts.src_mac[0], opts.src_mac[1], opts.src_mac[2],
            opts.src_mac[3], opts.src_mac[4], opts.src_mac[5],
