@@ -1197,8 +1197,14 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK_NOLINK (struct ttp_fsm_event *qev)
         return false;
     }
 
-    if (TTP_ST__OPEN == lt->state ||
-        TTP_ST__OPEN_SENT == lt->state ||
+    if (TTP_ST__OPEN == lt->state) {
+        qev->fsm_override = 1;
+        qev->fsm_response = TTP_RS__INTERRUPT;
+        qev->fsm_next_state = TTP_ST__stay;
+        return true;
+    }
+
+    if (TTP_ST__OPEN_SENT == lt->state ||
         TTP_ST__OPEN_RECD == lt->state) {
         lt->open_tx_pending = true;
         qev->fsm_override = 1;
@@ -1318,7 +1324,7 @@ struct ttp_fsm_state_var ttp_fsm_table[TTP_EV__NUM_EV][TTP_ST__NUM_ST] = /*     
     [TTP_EV__RXQ__TTP_ACK]         = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_DROP__ns_stay        ,         rs_DROP__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_NACK]        = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_DROP__ns_stay        ,         rs_DROP__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_NACK_FULL]   = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_DROP__ns_stay        ,         rs_DROP__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
-    [TTP_EV__RXQ__TTP_NACK_NOLINK] = { _no_rs__no_ns_  ,         rs_STALL__ns_stay        ,       rs_STALL__ns_stay        ,        rs_STALL__ns_stay    ,        rs_OPEN__ns_OPEN_SENT   ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
+    [TTP_EV__RXQ__TTP_NACK_NOLINK] = { _no_rs__no_ns_  ,         rs_STALL__ns_stay        ,       rs_STALL__ns_stay        ,        rs_STALL__ns_stay    ,   rs_INTERRUPT__ns_stay     ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__RXQ__TTP_UNXP_PAYLD]  = { _no_rs__no_ns_  ,   rs_NACK_NOLINK__ns_stay        ,        rs_none__ns_stay        ,         rs_NACK__ns_stay    ,        rs_NACK__ns_stay        ,         rs_NACK__ns_stay       ,       rs_ILLEGAL__ns_stay       , },
     [TTP_EV__AKQ__OPEN_ACK]        = { _no_rs__no_ns_  ,          rs_DROP__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
     [TTP_EV__AKQ__OPEN_NACK]       = { _no_rs__no_ns_  ,     rs_OPEN_NACK__ns_stay        ,        rs_none__ns_stay        ,         rs_none__ns_stay    ,        rs_none__ns_stay        ,         rs_none__ns_stay       ,          rs_none__ns_stay       , },
