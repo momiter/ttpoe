@@ -31,9 +31,6 @@
 #define TTP_SOCK_RXQ_LIMIT      128
 #define TTP_CONNECT_TIMEOUT_MS  3000
 #define TTP_SOCK_MAX_FRAGS      DIV_ROUND_UP(TTP_SOCK_MSG_MAX, TTP_SOCK_FRAG_DATA_MAX)
-#define TTP_SOCK_FRAG_MAGIC0    0x54
-#define TTP_SOCK_FRAG_MAGIC1    0x46
-#define TTP_SOCK_FRAG_MAGIC2    0x31
 
 static LIST_HEAD(ttp_listener_head);
 static DEFINE_SPINLOCK(ttp_listener_lock);

@@ -108,7 +108,84 @@ static bool ttp_vc_rx_opcode_is_valid (u8 vc, enum ttp_opcodes_enum op)
 
 static bool ttp_ext_type_is_supported (u8 ext)
 {
+    /*
+     * Keep the software extension framework explicit. The spec reserves several
+     * extension ranges, but this implementation currently supports only:
+     *   - BASE(0x00): no extension header, legacy/small payload path.
+     *   - PAYLOAD_OFFSET(0xe0): AF_TTP socket fragmentation metadata.
+     * Everything else is intentionally unsupported and is dropped by the header
+     * validator before entering the FSM.
+     */
     return ext == TTP_ET__BASE || ext == TTP_ET__PAYLOAD_OFFSET;
+}
+
+static bool ttp_payload_offset_ext_valid (struct ttp_frame_hdr *frh,
+                                          struct ttp_pkt_info *pif)
+{
+    const struct ttp_ttpoe_noc_hdr *nh;
+    u8 flags;
+    u16 frag_len;
+    u32 total_len;
+    u32 frag_off;
+    u64 xhdr2;
+
+    if (!frh || !frh->noc || !pif) {
+        return false;
+    }
+    if (pif->noc_len < sizeof (*nh)) {
+        TTP_DBG ("%s: payload extension without noc header len:%u\n",
+                 __FUNCTION__, pif->noc_len);
+        return false;
+    }
+
+    nh = frh->noc;
+    flags = nh->xhdr1_fmt.extn_hdr1[0];
+    frag_len = ((u16)nh->xhdr1_fmt.extn_hdr1[2] << 8) |
+               (u16)nh->xhdr1_fmt.extn_hdr1[3];
+    xhdr2 = be64_to_cpu (nh->xhdr2_u64);
+    total_len = (u32)(xhdr2 >> 32);
+    frag_off = (u32)xhdr2;
+
+    if (nh->xhdr1_fmt.type != TTP_ET__PAYLOAD_OFFSET) {
+        TTP_DBG ("%s: noc extension type:0x%02x expected:0x%02x\n",
+                 __FUNCTION__, nh->xhdr1_fmt.type, TTP_ET__PAYLOAD_OFFSET);
+        return false;
+    }
+    if (flags & ~TTP_SOCK_FRAG_F_MASK) {
+        TTP_DBG ("%s: unsupported payload offset flags:0x%02x\n",
+                 __FUNCTION__, flags);
+        return false;
+    }
+    if (nh->xhdr1_fmt.extn_hdr1[1] != TTP_SOCK_FRAG_META_VER ||
+        nh->xhdr1_fmt.extn_hdr1[4] != TTP_SOCK_FRAG_MAGIC0 ||
+        nh->xhdr1_fmt.extn_hdr1[5] != TTP_SOCK_FRAG_MAGIC1 ||
+        nh->xhdr1_fmt.extn_hdr1[6] != TTP_SOCK_FRAG_MAGIC2) {
+        TTP_DBG ("%s: unsupported payload offset metadata\n", __FUNCTION__);
+        return false;
+    }
+    if (!frag_len || frag_len != (u16)(pif->noc_len - sizeof (*nh))) {
+        TTP_DBG ("%s: invalid frag-len:%u noc-len:%u\n",
+                 __FUNCTION__, frag_len, pif->noc_len);
+        return false;
+    }
+    if (!total_len || total_len > TTP_SOCK_MSG_MAX || frag_off > total_len ||
+        frag_len > total_len - frag_off) {
+        TTP_DBG ("%s: invalid frag bounds total:%u off:%u len:%u\n",
+                 __FUNCTION__, total_len, frag_off, frag_len);
+        return false;
+    }
+    if ((flags & TTP_SOCK_FRAG_F_FIRST) && frag_off) {
+        TTP_DBG ("%s: first fragment with non-zero offset:%u\n",
+                 __FUNCTION__, frag_off);
+        return false;
+    }
+    if ((flags & TTP_SOCK_FRAG_F_LAST) && frag_off + frag_len != total_len) {
+        TTP_DBG ("%s: last fragment does not end message total:%u off:%u len:%u\n",
+                 __FUNCTION__, total_len, frag_off, frag_len);
+        return false;
+    }
+
+    return true;
 }
 
 static bool ttp_header_validate (struct ttp_frame_hdr *frh,
@@ -183,9 +260,7 @@ static bool ttp_header_validate (struct ttp_frame_hdr *frh,
                      TTP_OPCODE_NAME (op));
             return false;
         }
-        if (pif->noc_len < sizeof (struct ttp_ttpoe_noc_hdr)) {
-            TTP_DBG ("%s: payload extension without noc header len:%u\n",
-                     __FUNCTION__, pif->noc_len);
+        if (!ttp_payload_offset_ext_valid (frh, pif)) {
             return false;
         }
     }
