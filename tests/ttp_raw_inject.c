@@ -34,6 +34,7 @@
 #define TTP_MIN_FRAME_LEN 64
 #define TTP_MAX_NOC_LEN   1024
 #define TTP_MAX_FRAME_LEN (ETH_HLEN + TTP_OE_HDRS_LEN + TTP_MAX_NOC_LEN)
+#define TTP_DATA_VC       2
 
 enum ttp_opcode {
     TTP_OPEN        = 0,
@@ -58,6 +59,7 @@ struct inject_opts {
     bool dst_mac_set;
     int opcode;
     int vc;
+    uint16_t epoch;
     uint32_t tx_id;
     uint32_t rx_id;
     uint8_t payload[TTP_MAX_NOC_LEN];
@@ -80,6 +82,7 @@ static void usage(const char *prog)
         "  --opcode OP            Name or number: open, open-ack, close, payload, ack,\n"
         "                         nack, nack-full, nack-nolink, close-ack, close-nack\n"
         "  --vc N                 VC id, default 2 (DATA VC)\n"
+        "  --epoch N              16-bit epoch value, default 0\n"
         "  --tx-id N              TTP TxID, default 0\n"
         "  --rx-id N              TTP RxID, default 0\n"
         "  --payload TEXT         NOC payload bytes for PAYLOAD or malformed control tests\n"
@@ -345,7 +348,7 @@ static size_t build_frame(const struct inject_opts *opts, uint8_t *frame)
     p[1] = (uint8_t)(opts->vc & 0xff);
     p[2] = 0; /* legacy conn_tx */
     p[3] = 0; /* legacy conn_rx */
-    put_be16(p + 4, 0); /* epoch */
+    put_be16(p + 4, opts->epoch);
     p[6] = 0; /* congestion */
     put_be16(p + 7, 0); /* reserved/version bits */
     p[9] = 0; /* extension count/type */
@@ -408,7 +411,7 @@ int main(int argc, char **argv)
 {
     struct inject_opts opts = {
         .opcode = -1,
-        .vc = TTP_VC__DATA,
+        .vc = TTP_DATA_VC,
         .count = 1,
     };
     uint8_t frame[TTP_MAX_FRAME_LEN];
@@ -477,6 +480,15 @@ int main(int argc, char **argv)
                 fprintf(stderr, "invalid --vc\n");
                 return 2;
             }
+        } else if (!strcmp(argv[i], "--epoch") && i + 1 < argc) {
+            uint32_t tmp;
+
+            rc = parse_u32(argv[++i], &tmp);
+            if (rc || tmp > UINT16_MAX) {
+                fprintf(stderr, "invalid --epoch\n");
+                return 2;
+            }
+            opts.epoch = (uint16_t)tmp;
         } else if (!strcmp(argv[i], "--tx-id") && i + 1 < argc) {
             rc = parse_u32(argv[++i], &opts.tx_id);
             if (rc) {
@@ -571,8 +583,8 @@ int main(int argc, char **argv)
 
     frame_len = build_frame(&opts, frame);
 
-    printf("dev=%s ifindex=%d opcode=%d vc=%d tx=%u rx=%u noc_len=%zu frame_len=%zu\n",
-           opts.ifname, ifindex, opts.opcode, opts.vc, opts.tx_id, opts.rx_id,
+    printf("dev=%s ifindex=%d opcode=%d vc=%d epoch=%u tx=%u rx=%u noc_len=%zu frame_len=%zu\n",
+           opts.ifname, ifindex, opts.opcode, opts.vc, opts.epoch, opts.tx_id, opts.rx_id,
            opts.payload_len, frame_len);
     printf("src=%02x:%02x:%02x:%02x:%02x:%02x dst=%02x:%02x:%02x:%02x:%02x:%02x\n",
            opts.src_mac[0], opts.src_mac[1], opts.src_mac[2],

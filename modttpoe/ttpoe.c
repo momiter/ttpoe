@@ -184,6 +184,19 @@ static void ttp_stats_count_rx_opcode (enum ttp_opcodes_enum op)
     }
 }
 
+static bool ttp_epoch_rx_valid (struct ttp_link_tag *lt, enum ttp_opcodes_enum op,
+                                u16 epoch)
+{
+    if (!lt || TTP_OP__TTP_OPEN == op) {
+        return true;
+    }
+    if (!lt->peer_epoch_valid) {
+        return true;
+    }
+
+    return lt->peer_epoch == epoch;
+}
+
 
 static int ttpoe_skb_recv_func (struct sk_buff *, struct net_device *dev,
                                 struct packet_type *pt, struct net_device *odev);
@@ -375,6 +388,7 @@ u16 ttp_skb_pars (const struct sk_buff *skb, struct ttp_frame_hdr *fh,
     fh->noc = (struct ttp_ttpoe_noc_hdr *)(pkp + ETH_HLEN + pi->noc_off);
     fh->dat = (struct ttp_ttpoe_noc_dat *)(pkp + ETH_HLEN + pi->dat_off);
 
+    pi->epoch = ntohs (fh->ttp->conn_epoch);
     pi->rxi_seq = ntohl (fh->ttp->conn_rx_seq);
     pi->txi_seq = ntohl (fh->ttp->conn_tx_seq);
 
@@ -427,6 +441,7 @@ int ttp_skb_dequ (void)
     struct ttp_fsm_event *ev;
     struct ttp_pkt_info pif;
     struct ttp_frame_hdr frh;
+    struct ttp_link_tag *lt;
     u8 mac[ETH_ALEN];
 
     if (!(skb = skb_dequeue (&ttp_global_root_head.skb_head))) {
@@ -495,6 +510,18 @@ int ttp_skb_dequ (void)
         TTP_DB1 ("%s: 0x%016llx (eth) dst:%*phC <- src:%*phC\n", __FUNCTION__,
                   cpu_to_be64 (ev->kid),
                   ETH_ALEN/2, &frh.eth->h_dest[3], ETH_ALEN/2, &frh.eth->h_source[3]);
+    }
+
+    lt = ttp_rbtree_tag_get (ev->kid);
+    if (!ttp_epoch_rx_valid (lt, frh.ttp->conn_opcode, pif.epoch)) {
+        TTP_DBG ("%s: epoch mismatch opcode:%s got:%u expected:%u kid:0x%016llx\n",
+                 __FUNCTION__, TTP_OPCODE_NAME (frh.ttp->conn_opcode),
+                 pif.epoch, lt->peer_epoch, cpu_to_be64 (ev->kid));
+        atomic_inc (&ttp_stats.drp_ct);
+        atomic_inc (&ttp_stats.epoch_mismatch_drops);
+        atomic_dec (&ttp_stats.skb_ct);
+        ttp_evt_pput (ev);
+        return 0;
     }
 
     ttp_evt_enqu (ev);
@@ -569,6 +596,7 @@ static bool ttp_skb_net_setup (struct sk_buff *skb, struct ttp_link_tag *lt, u16
     }
     frh.ttp->conn_opcode = op;
     frh.ttp->conn_vc = lt ? lt->vci : TTP_VC__DATA;
+    frh.ttp->conn_epoch = htons (lt && lt->valid ? lt->local_epoch : 0);
 
     if (t3) { /* ip4 encap */
         frh.ttp->conn_version = 2;
@@ -639,7 +667,7 @@ bool ttp_skb_prep (struct sk_buff **skbp, struct ttp_fsm_event *qev,
     u16 nl = 0;
     bool new = false; /* skb moved */
     struct sk_buff *skb = NULL;
-    struct ttp_link_tag *lt, qlt;
+    struct ttp_link_tag *lt, qlt = {0};
 
     if (TTP_OP__TTP_PAYLOAD == op) {
         if (!(nl = qev->psi.noc_len)) {

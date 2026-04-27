@@ -291,6 +291,7 @@ struct ttp_pkt_info {
     u16 ttp_off;  /* ttp transport header offset */
     u16 noc_off;
     u16 dat_off;
+    u16 epoch;
 
     u32 rxi_seq;
     u32 txi_seq;

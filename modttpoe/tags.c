@@ -85,8 +85,30 @@ struct ttp_link_tag  ttp_link_tag_tbl_1[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM];
 struct ttp_link_tag  ttp_link_tag_tbl_2[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM];
 
 struct ttp_stats_all ttp_stats;
+static atomic_t ttp_epoch_next = ATOMIC_INIT (0);
 
 int ttp_tag_seq_init_val = 1; /* can be any value (try: test with other values) */
+
+static u16 ttp_epoch_alloc (void)
+{
+    u16 epoch = (u16)atomic_inc_return (&ttp_epoch_next);
+
+    if (!epoch) {
+        epoch = (u16)atomic_inc_return (&ttp_epoch_next);
+    }
+
+    return epoch;
+}
+
+void ttp_tag_note_peer_epoch (struct ttp_link_tag *lt, u16 epoch)
+{
+    if (!lt) {
+        return;
+    }
+
+    lt->peer_epoch = epoch;
+    lt->peer_epoch_valid = true;
+}
 
 TTP_NOTRACE
 static u8 ttp_tag_index_hash_get (u64 kid)
@@ -684,6 +706,8 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->close_rx_id = 0;
     lt->close_nack_rx_id = 0;
     lt->peer_close_tx_id = 0;
+    lt->local_epoch = 0;
+    lt->peer_epoch = 0;
     lt->close_blocked = false;
     lt->nack_recovery_active = false;
     lt->full_blocked = false;
@@ -691,6 +715,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->close_ack_pending = false;
     lt->close_ack_sent = false;
     lt->open_tx_pending = false;
+    lt->peer_epoch_valid = false;
 
     lt->tex = false;    /* timer expired */
     lt->twz = (u16)clamp_t (int, ttp_tx_window, 1, 64);
@@ -773,6 +798,9 @@ int ttp_tag_add (u64 kid)
             lt->retire_id = ttp_tag_seq_init_val;
             lt->rx_seq_id = ttp_tag_seq_init_val;
             lt->tx_seq_id = ttp_tag_seq_init_val + 1; /* TTP_OPEN: init-val, use next */
+            lt->local_epoch = ttp_epoch_alloc ();
+            lt->peer_epoch = 0;
+            lt->peer_epoch_valid = false;
 
             atomic_inc (&ttp_stats.adds[bk]);
             return 0;

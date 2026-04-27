@@ -200,6 +200,7 @@ static bool ttp_fsm_sef__TAG_ALLOC (struct ttp_fsm_event *ev)
         ev->evt = TTP_EV__INQ__ALLOC_TAG;
         lt = ttp_rbtree_tag_get (ev->kid);
         lt->rx_seq_id = ev->psi.txi_seq; /* init tag-rx-seq-id with OPEN's tx-seq-id */
+        ttp_tag_note_peer_epoch (lt, ev->psi.epoch);
         lt->state = TTP_ST__OPEN_RECD;
         rv = ttpoe_socket_accept_prepare (ev->kid);
         if (rv < 0) {
@@ -927,6 +928,7 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_OPEN (struct ttp_fsm_event *qev)
 
     if ((lt = ttp_rbtree_tag_get (qev->kid))) {
         lt->rx_seq_id = qev->psi.txi_seq; /* init tag-rx-seq-id with OPEN's tx-seq-id */
+        ttp_tag_note_peer_epoch (lt, qev->psi.epoch);
         if (TTP_ST__OPEN_SENT == lt->state) {
             lt->open_tx_pending = false;
         }
@@ -954,6 +956,7 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_OPEN_ACK (struct ttp_fsm_event *qev)
         return false;
     }
 
+    ttp_tag_note_peer_epoch (lt, qev->psi.epoch);
     lt->retire_id = qev->psi.rxi_seq; /* store seq-id open (got in ACK as rxi-seq) */
     if (lt->open_tx_pending) {
         lt->open_tx_pending = false;
@@ -982,6 +985,9 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_OPEN_NACK (struct ttp_fsm_event *qev)
         return false;
     }
 
+    if (qev->psi.epoch) {
+        ttp_tag_note_peer_epoch (lt, qev->psi.epoch);
+    }
     lt->open_tx_pending = false;
     if (timer_pending (&lt->tmr)) {
         tv = del_timer (&lt->tmr);

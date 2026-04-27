@@ -226,6 +226,8 @@ struct ttp_link_tag {
     u32 close_rx_id;
     u32 close_nack_rx_id;
     u32 peer_close_tx_id;
+    u16 local_epoch;
+    u16 peer_epoch;
     bool close_blocked;
     bool nack_recovery_active;
     bool full_blocked;
@@ -234,6 +236,7 @@ struct ttp_link_tag {
     bool close_ack_pending;
     bool close_ack_sent;
     bool open_tx_pending;
+    bool peer_epoch_valid;
 
     atomic_t opens;
     struct ttp_sock *sock;
@@ -348,6 +351,7 @@ struct ttp_stats_all {
     atomic_t duplicate_nack_ignored;
     atomic_t payload_timeouts;
     atomic_t full_backoff_timeouts;
+    atomic_t epoch_mismatch_drops;
 
     u16  wkq_st;
     u16  wkq_sz;
@@ -402,5 +406,6 @@ extern bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq);
 extern bool ttp_noc_mark_retransmit_one (struct ttp_link_tag *lt, u32 seq);
 extern void ttp_noc_start_full_backoff (struct ttp_link_tag *lt, struct ttp_fsm_event *qev);
 extern void ttp_noc_mark_timeout (struct ttp_link_tag *lt);
+extern void ttp_tag_note_peer_epoch (struct ttp_link_tag *lt, u16 epoch);
 
 #endif
