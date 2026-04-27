@@ -1099,7 +1099,11 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_CLOSE (struct ttp_fsm_event *qev)
     lt->close_ack_sent = false;
     qev->fsm_override = 1;
     qev->fsm_response = TTP_RS__none;
-    if (TTP_ST__CLOSE_RECD == lt->state) {
+    if (TTP_ST__CLOSE_SENT == lt->state && ttp_tag_is_quiesced (lt)) {
+        qev->fsm_response = TTP_RS__CLOSE_ACK;
+        qev->fsm_next_state = TTP_ST__CLOSED;
+    }
+    else if (TTP_ST__CLOSE_RECD == lt->state) {
         qev->fsm_next_state = TTP_ST__stay;
         if (ttp_tag_is_quiesced (lt)) {
             ttp_fsm_enqueue_internal (qev->kid, TTP_EV__INQ__YES_QUIESCED);
