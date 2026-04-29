@@ -49,6 +49,39 @@ static void ttp_sock_maybe_finalize_detached(struct ttp_sock *tsk);
 static int ttp_sock_build_target(struct ttp_sock *tsk, struct ttpoe_host_info *tg);
 static void ttp_sock_put(struct ttp_sock *tsk);
 
+static bool ttp_sock_vci_supported(u8 vci)
+{
+    /*
+     * The protocol core currently freezes VC0/VC1 request channels and only
+     * supports DATA traffic on VC2. Keep AF_TTP aligned with that boundary so
+     * performance tests do not silently bind sockets to an unsupported VC.
+     */
+    return vci == TTP_VC__DATA;
+}
+
+static bool ttp_sock_eof_ready(struct ttp_sock *tsk)
+{
+    int state = READ_ONCE(tsk->state);
+
+    if (state == TTP_SS_CLOSED || state == TTP_SS_PEER_CLOSED) {
+        return true;
+    }
+
+    /*
+     * For the perf-test path the sender calls shutdown(SHUT_WR) and then waits
+     * for recvmsg() to report completion.  Do not treat the close request itself
+     * as EOF: data may still be queued or in flight.  close_sent is only set by
+     * ttp_sock_request_close() after the tag reports no pending payload work, so
+     * it is the earliest safe local-drain point.
+     */
+    if (READ_ONCE(tsk->close_requested) &&
+        (READ_ONCE(tsk->close_sent) || !READ_ONCE(tsk->kid))) {
+        return true;
+    }
+
+    return false;
+}
+
 static void ttp_sock_wake(struct ttp_sock *tsk)
 {
     wake_up_interruptible(&tsk->waitq);
@@ -938,7 +971,7 @@ static int ttp_sock_build_target(struct ttp_sock *tsk, struct ttpoe_host_info *t
     unsigned long flags;
 
     spin_lock_irqsave(&tsk->lock, flags);
-    if (!tsk->ifindex || !TTP_VC_ID__IS_VALID(tsk->vci)) {
+    if (!tsk->ifindex || !ttp_sock_vci_supported(tsk->vci)) {
         spin_unlock_irqrestore(&tsk->lock, flags);
         return -EINVAL;
     }
@@ -1007,7 +1040,7 @@ static int ttp_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
     if (addr->st_family != ttp_socket_family) {
         return -EINVAL;
     }
-    if (addr->st_ifindex == 0 || !TTP_VC_ID__IS_VALID(addr->st_vci)) {
+    if (addr->st_ifindex == 0 || !ttp_sock_vci_supported(addr->st_vci)) {
         return -EINVAL;
     }
     if (addr->st_node[0] || addr->st_node[1] || addr->st_node[2]) {
@@ -1069,6 +1102,9 @@ static int ttp_connect(struct socket *sock, struct sockaddr *uaddr, int addr_len
         return -EINVAL;
     }
     if (!addr->st_node[0] && !addr->st_node[1] && !addr->st_node[2]) {
+        return -EINVAL;
+    }
+    if (addr->st_vci != tsk->vci) {
         return -EINVAL;
     }
 
@@ -1356,8 +1392,7 @@ static int ttp_recvmsg(struct socket *sock, struct msghdr *msg, size_t total_len
             if (READ_ONCE(tsk->state) == TTP_SS_ERROR) {
                 return -READ_ONCE(tsk->last_error);
             }
-            if (READ_ONCE(tsk->state) == TTP_SS_CLOSED ||
-                READ_ONCE(tsk->state) == TTP_SS_PEER_CLOSED) {
+            if (ttp_sock_eof_ready(tsk)) {
                 return 0;
             }
             return -EAGAIN;
@@ -1367,8 +1402,7 @@ static int ttp_recvmsg(struct socket *sock, struct msghdr *msg, size_t total_len
             tsk->waitq,
             !skb_queue_empty(&tsk->rxq) ||
             READ_ONCE(tsk->state) == TTP_SS_ERROR ||
-            READ_ONCE(tsk->state) == TTP_SS_CLOSED ||
-            READ_ONCE(tsk->state) == TTP_SS_PEER_CLOSED ||
+            ttp_sock_eof_ready(tsk) ||
             (READ_ONCE(tsk->shutdown_mask) & TTP_SOCK_SHUT_RD));
         if (rc < 0) {
             return -ERESTARTSYS;
@@ -1379,8 +1413,7 @@ static int ttp_recvmsg(struct socket *sock, struct msghdr *msg, size_t total_len
             if (READ_ONCE(tsk->state) == TTP_SS_ERROR) {
                 return -READ_ONCE(tsk->last_error);
             }
-            if (READ_ONCE(tsk->state) == TTP_SS_CLOSED ||
-                READ_ONCE(tsk->state) == TTP_SS_PEER_CLOSED ||
+            if (ttp_sock_eof_ready(tsk) ||
                 (READ_ONCE(tsk->shutdown_mask) & TTP_SOCK_SHUT_RD)) {
                 return 0;
             }
@@ -1538,30 +1571,54 @@ void ttpoe_socket_fsm_event(struct ttp_fsm_event *ev, int rs, int ns)
         }
         break;
     case TTP_EV__RXQ__TTP_NACK_NOLINK:
-        if (state == TTP_SS_CONNECTING) {
+        if (rs == TTP_RS__NOC_END ||
+            state == TTP_SS_LOCAL_CLOSED ||
+            state == TTP_SS_PEER_CLOSED ||
+            state == TTP_SS_CLOSED) {
+            ttp_sock_unbind_tag(tsk);
+            ttp_sock_set_state(tsk, TTP_SS_CLOSED);
+        } else if (state == TTP_SS_CONNECTING) {
             ttp_sock_set_error(tsk, ECONNREFUSED);
+            ttp_sock_unbind_tag(tsk);
         } else {
             ttp_sock_set_error(tsk, EHOSTUNREACH);
+            ttp_sock_unbind_tag(tsk);
         }
-        ttp_sock_unbind_tag(tsk);
         break;
     case TTP_EV__RXQ__TTP_CLOSE:
         ttp_sock_note_peer_closed(tsk);
         break;
     case TTP_EV__RXQ__TTP_CLOSE_ACK:
-        if (state == TTP_SS_LOCAL_CLOSED || state == TTP_SS_PEER_CLOSED) {
+        if (state == TTP_SS_LOCAL_CLOSED ||
+            state == TTP_SS_PEER_CLOSED ||
+            state == TTP_SS_CLOSED) {
             ttp_sock_unbind_tag(tsk);
             ttp_sock_set_state(tsk, TTP_SS_CLOSED);
         }
         break;
     case TTP_EV__RXQ__TTP_CLOSE_NACK:
-        ttp_sock_set_error(tsk, ECONNRESET);
-        ttp_sock_unbind_tag(tsk);
+        /*
+         * CLOSE_NACK is a protocol-level close-boundary backoff signal. It is
+         * not a socket error by itself; the protocol will replay CLOSE after
+         * pending data drains, or surface a real timeout/link error later.
+         */
+        ttp_sock_wake(tsk);
         break;
     default:
         break;
     }
 
+    if (rs == TTP_RS__NOC_END) {
+        ttp_sock_unbind_tag(tsk);
+        ttp_sock_set_state(tsk, TTP_SS_CLOSED);
+    }
+    if (rs == TTP_RS__INTERRUPT) {
+        if (READ_ONCE(tsk->state) != TTP_SS_CLOSED &&
+            READ_ONCE(tsk->state) != TTP_SS_ERROR) {
+            ttp_sock_set_error(tsk, EHOSTUNREACH);
+        }
+        ttp_sock_unbind_tag(tsk);
+    }
     if (rs == TTP_RS__NOC_FAIL) {
         if (state == TTP_SS_CONNECTING) {
             ttp_sock_set_error(tsk, ETIMEDOUT);

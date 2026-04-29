@@ -728,6 +728,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->txt = 0;        /* tx-scheduled count */
     lt->try = 0;        /* tx-retry count */
     lt->full_retry = 0;
+    lt->close_retry = 0;
     lt->full_backoff_active = false;
 
     lt->_rkid = 0ULL;   /* clear whole raw key id */

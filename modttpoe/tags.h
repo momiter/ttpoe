@@ -190,6 +190,7 @@ extern struct ttp_link_tag_global ttp_global_root_head;
 #define TTP_TMX_FULL_BASE_MS  100
 #define TTP_TMX_FULL_MAX_MS  1000
 #define TTP_FULL_MAX_RETRY     16
+#define TTP_CLOSE_MAX_RETRY    16
 
 
 /* Tag value of a single 148b tag entry */
@@ -207,6 +208,7 @@ struct ttp_link_tag {
     u16                txt;     /* tx-scheduled count */
     u16                try;     /* tx-retry count */
     u16                full_retry; /* NACK_FULL probe retry count */
+    u16                close_retry; /* CLOSE replay retry count */
 
     u8  valid;                  /* tag valid */
     u8  state;                  /* 3b state[2:0] in HW; in SW use enum ttp_states_enum */

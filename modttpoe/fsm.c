@@ -464,6 +464,16 @@ static bool ttp_fsm_rs__CLOSE (struct ttp_fsm_event *ev)
     lt->close_blocked = false;
     lt->close_nack_rx_id = 0;
 
+    if (lt->close_retry >= TTP_CLOSE_MAX_RETRY) {
+        TTP_EVLOG (ev, TTP_LG__TTP_LINK_DOWN, TTP_OP__TTP_CLOSE);
+        ttpoe_socket_link_error (lt->_rkid, ETIMEDOUT);
+        if (timer_pending (&lt->tmr)) {
+            del_timer (&lt->tmr);
+        }
+        ttp_tag_reset (lt);
+        return true;
+    }
+
     if (!ttp_skb_prep (&skb, ev, op)) {
         TTP_EVLOG (ev, TTP_LG__PKT_DROP, op);
         return false;
@@ -478,6 +488,7 @@ static bool ttp_fsm_rs__CLOSE (struct ttp_fsm_event *ev)
 
     ttp_skb_xmit (skb);
     TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
+    lt->close_retry++;
 
     if (timer_pending (&lt->tmr)) {
         mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_CLOSE_SENT));
