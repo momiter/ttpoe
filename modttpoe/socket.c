@@ -31,6 +31,7 @@
 #define TTP_SOCK_RXQ_LIMIT      128
 #define TTP_CONNECT_TIMEOUT_MS  3000
 #define TTP_SOCK_MAX_FRAGS      DIV_ROUND_UP(TTP_SOCK_MSG_MAX, TTP_SOCK_FRAG_DATA_MAX)
+#define TTP_SOCK_EVENT_RESERVE  128
 
 static LIST_HEAD(ttp_listener_head);
 static DEFINE_SPINLOCK(ttp_listener_lock);
@@ -57,6 +58,17 @@ static bool ttp_sock_vci_supported(u8 vci)
      * performance tests do not silently bind sockets to an unsupported VC.
      */
     return vci == TTP_VC__DATA;
+}
+
+static bool ttp_sock_event_pool_has_room(int needed)
+{
+    bool ok;
+
+    mutex_lock(&ttp_global_root_head.event_mutx);
+    ok = ttp_stats.pool >= needed + TTP_SOCK_EVENT_RESERVE;
+    mutex_unlock(&ttp_global_root_head.event_mutx);
+
+    return ok;
 }
 
 static bool ttp_sock_eof_ready(struct ttp_sock *tsk)
@@ -1281,6 +1293,10 @@ static int ttp_sendmsg(struct socket *sock, struct msghdr *msg, size_t total_len
     }
 
     if (total_len <= TTP_NOC_DAT_SIZE) {
+        if (!ttp_sock_event_pool_has_room(1)) {
+            return -ENOBUFS;
+        }
+
         buf = ttp_skb_aloc(&skb, (int)total_len);
         if (!buf) {
             return -ENOMEM;
@@ -1302,8 +1318,14 @@ static int ttp_sendmsg(struct socket *sock, struct msghdr *msg, size_t total_len
         return (int)total_len;
     }
 
+    frag_cnt = DIV_ROUND_UP(total_len, TTP_SOCK_FRAG_DATA_MAX);
+    if (!ttp_sock_event_pool_has_room(frag_cnt)) {
+        return -ENOBUFS;
+    }
+
     remaining = total_len;
     frag_off = 0;
+    frag_cnt = 0;
     while (remaining) {
         if (frag_cnt >= TTP_SOCK_MAX_FRAGS) {
             rv = -E2BIG;
@@ -1398,18 +1420,21 @@ static int ttp_recvmsg(struct socket *sock, struct msghdr *msg, size_t total_len
             return -EAGAIN;
         }
     } else {
-        rc = wait_event_interruptible(
-            tsk->waitq,
-            !skb_queue_empty(&tsk->rxq) ||
-            READ_ONCE(tsk->state) == TTP_SS_ERROR ||
-            ttp_sock_eof_ready(tsk) ||
-            (READ_ONCE(tsk->shutdown_mask) & TTP_SOCK_SHUT_RD));
-        if (rc < 0) {
-            return -ERESTARTSYS;
-        }
+        for (;;) {
+            rc = wait_event_interruptible(
+                tsk->waitq,
+                !skb_queue_empty(&tsk->rxq) ||
+                READ_ONCE(tsk->state) == TTP_SS_ERROR ||
+                ttp_sock_eof_ready(tsk) ||
+                (READ_ONCE(tsk->shutdown_mask) & TTP_SOCK_SHUT_RD));
+            if (rc < 0) {
+                return -ERESTARTSYS;
+            }
 
-        skb = skb_dequeue(&tsk->rxq);
-        if (!skb) {
+            skb = skb_dequeue(&tsk->rxq);
+            if (skb) {
+                break;
+            }
             if (READ_ONCE(tsk->state) == TTP_SS_ERROR) {
                 return -READ_ONCE(tsk->last_error);
             }
@@ -1417,7 +1442,6 @@ static int ttp_recvmsg(struct socket *sock, struct msghdr *msg, size_t total_len
                 (READ_ONCE(tsk->shutdown_mask) & TTP_SOCK_SHUT_RD)) {
                 return 0;
             }
-            return -EAGAIN;
         }
     }
 

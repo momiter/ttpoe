@@ -275,6 +275,7 @@ static bool ttp_header_validate (struct ttp_frame_hdr *frh,
 
 int ttp_shutdown = 1; /* 'DOWN' by default - enabled at init after checking */
 int ttp_drop_pct = 0; /* drop percent = 0% by default */
+int ttp_drop_ppm = 0; /* fine-grained drop rate in parts per million */
 
 char *ttp_dev;
 u32   ttp_ipv4_prefix;
@@ -967,8 +968,9 @@ static int ttp_skb_recv (struct sk_buff *skb)
     if (!skb) {
         return 0;
     }
-    if (ttp_rnd_flip (ttp_drop_pct)) {
-        TTP_DBG ("%s: ->! Rx frame dropped: rate:%d%%\n", __FUNCTION__, ttp_drop_pct);
+    if (ttp_rnd_flip (ttp_drop_pct) || ttp_rnd_flip_ppm (ttp_drop_ppm)) {
+        TTP_DBG ("%s: ->! Rx frame dropped: rate:%d%% ppm:%d\n",
+                 __FUNCTION__, ttp_drop_pct, ttp_drop_ppm);
         goto drop;
     }
 

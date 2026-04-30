@@ -137,6 +137,7 @@ static inline int ttp_dev_uevent (
                               TTP_XX2VAL ((n) > (y) ? (a)[(y)] : 0))
 
 extern int ttp_drop_pct;
+extern int ttp_drop_ppm;
 extern int ttp_verbose;
 extern int ttp_shutdown;
 extern char *ttp_dev;
@@ -239,6 +240,18 @@ static inline bool ttp_rnd_flip (int pct)
     }
 
     return false;
+}
+
+static inline bool ttp_rnd_flip_ppm (int ppm)
+{
+    if (ppm <= 0) {
+        return false;
+    }
+    if (ppm >= 1000000) {
+        return true;
+    }
+
+    return (get_random_u32 () % 1000000) < (u32)ppm;
 }
 
 

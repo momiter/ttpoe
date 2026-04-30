@@ -575,6 +575,25 @@ static const struct kernel_param_ops ttp_param_drop_pct_ops = {
 module_param_cb (drop_pct, &ttp_param_drop_pct_ops, &ttp_drop_pct, 0664);
 MODULE_PARM_DESC (drop_pct, " packet drop percent (default=(0), [0:10])");
 
+static int ttp_param_drop_ppm_set (const char *val, const struct kernel_param *kp)
+{
+    int vv = 0;
+
+    if ((0 != kstrtoint (val, 10, &vv)) || vv < 0 || vv > 1000000) {
+        return -EINVAL;
+    }
+
+    return param_set_int (val, kp);
+}
+
+static const struct kernel_param_ops ttp_param_drop_ppm_ops = {
+    .set = ttp_param_drop_ppm_set,
+    .get = param_get_int,
+};
+
+module_param_cb (drop_ppm, &ttp_param_drop_ppm_ops, &ttp_drop_ppm, 0664);
+MODULE_PARM_DESC (drop_ppm, " packet drop rate in ppm (default=(0), [0:1000000])");
+
 
 static int ttp_param_shutdown_set (const char *val, const struct kernel_param *kp)
 {
