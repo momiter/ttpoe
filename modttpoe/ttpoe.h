@@ -77,7 +77,7 @@ static inline u32 ttp_seq_next_u32 (u32 seq)
     return seq + 1;
 }
 
-#define TTP_NOC_BUF_SIZE  (1024) /* Size of NOC buffer, including NOC Header + Data */
+#define TTP_NOC_BUF_SIZE  (1440) /* NOC Header + Data; keeps raw Ethernet skb around 1500B */
 #define TTP_NOC_DAT_SIZE  (TTP_NOC_BUF_SIZE - sizeof (struct ttp_ttpoe_noc_hdr))
 #define TTP_NOC_NUM_64B   (TTP_NOC_DAT_SIZE / sizeof (u64))
 #define TTP_SOCK_MSG_MAX  (64 * 1024)

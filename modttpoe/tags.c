@@ -88,6 +88,7 @@ struct ttp_stats_all ttp_stats;
 static atomic_t ttp_epoch_next = ATOMIC_INIT (0);
 
 int ttp_tag_seq_init_val = 1; /* can be any value (try: test with other values) */
+int ttp_evlog_enabled = 1;
 
 static inline void ttp_tag_touch (struct ttp_link_tag *lt)
 {
@@ -931,6 +932,10 @@ void ttp_fsm_evlog_add (const char *fil, const int lin,
     struct ttp_link_tag *lt;
     struct ttp_fsm_evlog *lg;
 
+    if (!READ_ONCE (ttp_evlog_enabled)) {
+        return;
+    }
+
     BUG_ON (qev && qev->tsk && qev->rsk);
 
     if (!mutex_trylock (&ttp_global_root_head.evlog_mutx)) {
@@ -1746,7 +1751,7 @@ void ttp_evt_enqu (struct ttp_fsm_event *ev)
 }
 
 
-void ttp_noc_enqu (struct ttp_fsm_event *ev)
+static void ttp_noc_enqu_common (struct ttp_fsm_event *ev, bool kick)
 {
     struct ttp_link_tag  *lt;
 
@@ -1757,10 +1762,11 @@ void ttp_noc_enqu (struct ttp_fsm_event *ev)
 
     mutex_lock (&ttp_global_root_head.event_mutx);
 
-    list_add_tail (&ev->elm, &lt->ncq);
-
-    mutex_unlock (&ttp_global_root_head.event_mutx);
-
+    /*
+     * Publish the event to ncq only after assigning its sequence and updating
+     * counters. Otherwise ACK retirement can observe a half-initialized tail
+     * entry when the fast path is not slowed down by debug/evlog work.
+     */
     TTP_RUN_SPIN_LOCKED ({
         ev->psi.txi_seq = lt->tx_seq_id;
         lt->tct++;
@@ -1769,17 +1775,42 @@ void ttp_noc_enqu (struct ttp_fsm_event *ev)
         ttp_stats.nocq++;
     });
 
-    /*
-     * Enqueueing into nocq is not enough on its own. The tag worker drains FSM
-     * queues, but it does not promote nocq entries into TXQ. Kick the TX-window
-     * scheduler immediately so newly queued payloads actually get sent.
-     */
-    ttp_noc_requ (lt);
+    list_add_tail (&ev->elm, &lt->ncq);
+
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+
+    if (kick) {
+        /*
+         * Enqueueing into nocq is not enough on its own. The tag worker drains
+         * FSM queues, but it does not promote nocq entries into TXQ. Kick the
+         * TX-window scheduler unless the caller is batching a fragment group.
+         */
+        ttp_noc_requ (lt);
+    }
 
     TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_ENQ, TTP_OP__TTP_PAYLOAD);
     TTP_DB1 ("%s: enqueue %s len:%d tx:%d mark:%s\n", __FUNCTION__,
              TTP_EVENT_NAME (ev->evt), ev->psi.noc_len, ev->psi.txi_seq,
              TTP_EVENTS_FENCE_TO_STR (ev->mrk));
+}
+
+void ttp_noc_enqu (struct ttp_fsm_event *ev)
+{
+    ttp_noc_enqu_common (ev, true);
+}
+
+void ttp_noc_enqu_defer (struct ttp_fsm_event *ev)
+{
+    ttp_noc_enqu_common (ev, false);
+}
+
+void ttp_noc_kick (u64 kid)
+{
+    struct ttp_link_tag *lt;
+
+    if ((lt = ttp_rbtree_tag_get (kid))) {
+        ttp_noc_requ (lt);
+    }
 }
 
 

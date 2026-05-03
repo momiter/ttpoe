@@ -269,8 +269,8 @@ static bool ttp_header_validate (struct ttp_frame_hdr *frh,
 }
 
 
-#if (TTP_NOC_BUF_SIZE>1024)
-#error "TTPoE max-noc buffer is 1K"
+#if (TTP_NOC_BUF_SIZE>1440)
+#error "TTPoE max-noc buffer exceeds raw Ethernet MTU-safe experiment limit"
 #endif
 
 int ttp_shutdown = 1; /* 'DOWN' by default - enabled at init after checking */

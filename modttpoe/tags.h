@@ -47,7 +47,7 @@
  * PARTICULAR PURPOSE. See the GNU General Public License for more details.
  */
 
-#define TTP_EVENTS_POOL_SIZE 1024 /* handle 2x512 tags */
+#define TTP_EVENTS_POOL_SIZE 1024 /* transport event pool; covers tags + data path */
 
 struct ttp_fsm_evlog {
     struct list_head       lm;
@@ -374,6 +374,7 @@ struct ttp_stats_all {
 
 extern struct ttp_stats_all ttp_stats;
 extern int    ttp_tag_seq_init_val;
+extern int    ttp_evlog_enabled;
 
 /* separate link-tag tables for each vci: [0, 1, 2] */
 extern struct ttp_link_tag ttp_link_tag_tbl_0[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM];
@@ -410,6 +411,8 @@ extern void ttp_noc_requ (struct ttp_link_tag *lt);
 extern int  ttp_noc_dequ (struct ttp_link_tag *lt);
 
 extern void ttp_noc_enqu (struct ttp_fsm_event *ev);
+extern void ttp_noc_enqu_defer (struct ttp_fsm_event *ev);
+extern void ttp_noc_kick (u64 kid);
 extern void ttp_evt_pput (struct ttp_fsm_event *ev);
 extern void ttp_evt_enqu (struct ttp_fsm_event *ev);
 

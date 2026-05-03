@@ -1378,8 +1378,9 @@ static int ttp_sendmsg(struct socket *sock, struct msghdr *msg, size_t total_len
 
     for (i = 0; i < frag_cnt; i++) {
         TTP_EVLOG(evs[i], TTP_LG__NOC_PAYLOAD_TX, TTP_OP__TTP_PAYLOAD);
-        ttp_noc_enqu(evs[i]);
+        ttp_noc_enqu_defer(evs[i]);
     }
+    ttp_noc_kick(kid);
 
     return (int)total_len;
 
