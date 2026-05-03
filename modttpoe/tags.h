@@ -243,6 +243,7 @@ struct ttp_link_tag {
     bool close_ack_sent;
     bool open_tx_pending;
     bool peer_epoch_valid;
+    unsigned long last_used;
 
     atomic_t opens;
     struct ttp_sock *sock;
@@ -363,6 +364,8 @@ struct ttp_stats_all {
     atomic_t rx_congestion_reduced;
     atomic_t tx_congestion_echo;
     atomic_t rx_congestion_echo;
+    atomic_t tag_victims;
+    atomic_t tag_victim_busy;
 
     u16  wkq_st;
     u16  wkq_sz;

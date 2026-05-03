@@ -89,6 +89,13 @@ static atomic_t ttp_epoch_next = ATOMIC_INIT (0);
 
 int ttp_tag_seq_init_val = 1; /* can be any value (try: test with other values) */
 
+static inline void ttp_tag_touch (struct ttp_link_tag *lt)
+{
+    if (lt && lt->valid) {
+        WRITE_ONCE (lt->last_used, jiffies);
+    }
+}
+
 static u16 ttp_epoch_alloc (void)
 {
     u16 epoch = (u16)atomic_inc_return (&ttp_epoch_next);
@@ -686,6 +693,11 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     sock = lt->sock;
     kid = lt->_rkid;
 
+    if (kid) {
+        atomic_inc (&ttp_stats.dels[lt->bkt]);
+        ttp_rbtree_tag_del (kid);
+    }
+
     lt->valid       = 0;
     lt->state       = TTP_ST__CLOSED;
     lt->sock        = NULL;
@@ -721,6 +733,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->close_ack_sent = false;
     lt->open_tx_pending = false;
     lt->peer_epoch_valid = false;
+    lt->last_used = 0;
 
     lt->tex = false;    /* timer expired */
     lt->twz = (u16)clamp_t (int, ttp_tx_window, 1, 64);
@@ -732,6 +745,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->full_backoff_active = false;
 
     lt->_rkid = 0ULL;   /* clear whole raw key id */
+    RB_CLEAR_NODE (&lt->rbn);
 
     if (sock) {
         ttpoe_socket_tag_drop(sock, kid);
@@ -740,6 +754,8 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
 
 void ttp_tag_force_reset(struct ttp_link_tag *lt)
 {
+    int dropped;
+
     if (!lt) {
         return;
     }
@@ -747,11 +763,75 @@ void ttp_tag_force_reset(struct ttp_link_tag *lt)
     del_timer_sync(&lt->tmr);
     cancel_work_sync(&lt->wkq);
 
+    dropped = lt->tct;
     while (ttp_noc_dequ(lt)) {
         ;
     }
+    if (dropped) {
+        if (ttp_stats.nocq >= dropped) {
+            ttp_stats.nocq -= dropped;
+        } else {
+            ttp_stats.nocq = 0;
+        }
+    }
 
     ttp_tag_reset(lt);
+}
+
+static bool ttp_tag_victim_allowed (struct ttp_link_tag *lt)
+{
+    bool busy = false;
+
+    if (!lt || !lt->valid) {
+        return false;
+    }
+
+    TTP_RUN_SPIN_LOCKED ({
+        busy = lt->sock || lt->sock_orphaned;
+    });
+
+    return !busy;
+}
+
+static struct ttp_link_tag *ttp_tag_lru_victim_get (struct ttp_link_tag *set)
+{
+    struct ttp_link_tag *lt, *victim = NULL;
+    int bk;
+
+    for (bk = 0; bk < TTP_TAG_TBL_BKTS_NUM; bk++) {
+        lt = &set[bk];
+
+        if (!ttp_tag_victim_allowed (lt)) {
+            continue;
+        }
+        if (!victim ||
+            time_before (READ_ONCE (lt->last_used), READ_ONCE (victim->last_used))) {
+            victim = lt;
+        }
+    }
+
+    return victim;
+}
+
+static bool ttp_tag_victimize_lru (struct ttp_link_tag *set)
+{
+    struct ttp_link_tag *victim;
+    u64 old_kid;
+
+    victim = ttp_tag_lru_victim_get (set);
+    if (!victim) {
+        atomic_inc (&ttp_stats.tag_victim_busy);
+        return false;
+    }
+
+    old_kid = victim->_rkid;
+    TTP_DB1 ("%s: evict lru tag 0x%016llx state:%u bkt:%u\n", __FUNCTION__,
+             cpu_to_be64 (old_kid), victim->state, victim->bkt);
+
+    ttp_tag_force_reset (victim);
+    atomic_inc (&ttp_stats.tag_victims);
+
+    return true;
 }
 
 
@@ -760,9 +840,10 @@ int ttp_tag_add (u64 kid)
 {
     u8  vc, gw, hv, t3;
     int bk;
-    struct ttp_link_tag *lt;
+    struct ttp_link_tag *lt, *set;
 
     if ((lt = ttp_rbtree_tag_get (kid))) {
+        ttp_tag_touch (lt);
         return 0;
     }
 
@@ -772,18 +853,20 @@ int ttp_tag_add (u64 kid)
     t3 = ttp_tag_index_tip_get (kid);
 
     if (vc == 0) {
-        lt = ttp_link_tag_tbl_0[hv];
+        set = ttp_link_tag_tbl_0[hv];
     }
     else if (vc == 1) {
-        lt = ttp_link_tag_tbl_1[hv];
+        set = ttp_link_tag_tbl_1[hv];
     }
     else if (vc == 2) {
-        lt = ttp_link_tag_tbl_2[hv];
+        set = ttp_link_tag_tbl_2[hv];
     }
     else {
         BUG_ON (1);
     }
 
+retry:
+    lt = set;
     /* try bkt-0, then bkt-1, ... */
     for (bk = 0; bk < TTP_TAG_TBL_BKTS_NUM; bk++) {
         if (!lt->valid) { /* found an empty slot */
@@ -800,6 +883,7 @@ int ttp_tag_add (u64 kid)
             lt->gwf = gw;
             lt->tip = t3;
             lt->hvl = hv;
+            lt->last_used = jiffies;
 
             lt->retire_id = ttp_tag_seq_init_val;
             lt->rx_seq_id = ttp_tag_seq_init_val;
@@ -818,7 +902,11 @@ int ttp_tag_add (u64 kid)
     atomic_inc (&ttp_stats.coll[hv]);
     atomic_inc (&ttp_stats.colls);
 
-    return 1; /* all 'ways' (bkts) full; victimize (TODO) */
+    if (ttp_tag_victimize_lru (set)) {
+        goto retry;
+    }
+
+    return 1; /* all ways full and no safe victim */
 }
 
 
@@ -1036,6 +1124,8 @@ void ttp_rbtree_tag_del (u64 kid)
         }
         else { /* keys are equal */
             rb_erase (&lt->rbn, &ttp_global_root_head.tag_rbroot);
+            RB_CLEAR_NODE (&lt->rbn);
+            return;
         }
     }
 }
@@ -1060,6 +1150,7 @@ struct ttp_link_tag *ttp_rbtree_tag_get (u64 kid)
             new = &((*new)->rb_right);
         }
         else { /* found it */
+            ttp_tag_touch (lt);
             return lt;
         }
     }

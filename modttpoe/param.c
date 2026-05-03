@@ -620,9 +620,10 @@ static int ttp_param_stats_get (char *buf, const struct kernel_param *kp)
     return snprintf
         (buf, 500,
          "frames: %d  [control: %d  payload: %d  drops: %d]\n"
-         "  adds: bkt-0: %-6d bkt-1: %-6d\n"
-         "  dels: bkt-0: %-6d bkt-1: %-6d\n"
-         "  pool: %d\n"
+          "  adds: bkt-0: %-6d bkt-1: %-6d\n"
+          "  dels: bkt-0: %-6d bkt-1: %-6d\n"
+          "victim: lru: %-6d busy: %-6d\n"
+          "  pool: %d\n"
          " queue: %d\n"
          " timer: %d\n"
          "  nocq: %d\n"
@@ -643,12 +644,14 @@ static int ttp_param_stats_get (char *buf, const struct kernel_param *kp)
          atomic_read (&ttp_stats.pld_ct) -
          atomic_read (&ttp_stats.drp_ct),
 
-         atomic_read (&ttp_stats.adds[0]),
-         atomic_read (&ttp_stats.adds[1]),
-         atomic_read (&ttp_stats.dels[0]),
-         atomic_read (&ttp_stats.dels[1]),
+          atomic_read (&ttp_stats.adds[0]),
+          atomic_read (&ttp_stats.adds[1]),
+          atomic_read (&ttp_stats.dels[0]),
+          atomic_read (&ttp_stats.dels[1]),
+          atomic_read (&ttp_stats.tag_victims),
+          atomic_read (&ttp_stats.tag_victim_busy),
 
-         ttp_stats.pool,
+          ttp_stats.pool,
          ttp_stats.queue,
          ttp_stats.timer,
          ttp_stats.nocq,
