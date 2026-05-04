@@ -302,6 +302,10 @@ struct ttp_pkt_info {
 
     u32 rxi_seq;
     u32 txi_seq;
+
+    bool sack_valid;
+    u32  sack_base;
+    u64  sack_bitmap;
 } __attribute__((packed));
 
 

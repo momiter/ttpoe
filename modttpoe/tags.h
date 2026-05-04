@@ -191,6 +191,14 @@ extern struct ttp_link_tag_global ttp_global_root_head;
 #define TTP_TMX_FULL_MAX_MS  1000
 #define TTP_FULL_MAX_RETRY     16
 #define TTP_CLOSE_MAX_RETRY    16
+#define TTP_RX_OOO_SIZE        64
+
+struct ttp_rx_ooo_entry {
+    bool valid;
+    u32 seq;
+    u16 noc_len;
+    struct sk_buff *skb;
+};
 
 
 /* Tag value of a single 148b tag entry */
@@ -244,6 +252,7 @@ struct ttp_link_tag {
     bool open_tx_pending;
     bool peer_epoch_valid;
     unsigned long last_used;
+    struct ttp_rx_ooo_entry *rx_ooo;
 
     atomic_t opens;
     struct ttp_sock *sock;
@@ -364,6 +373,11 @@ struct ttp_stats_all {
     atomic_t rx_congestion_reduced;
     atomic_t tx_congestion_echo;
     atomic_t rx_congestion_echo;
+    atomic_t tx_sack_nack;
+    atomic_t rx_sack_nack;
+    atomic_t rx_sack_cached;
+    atomic_t rx_sack_delivered;
+    atomic_t rx_sack_dropped;
     atomic_t tag_victims;
     atomic_t tag_victim_busy;
 
@@ -420,9 +434,17 @@ extern void ttp_evt_cpqu (struct ttp_fsm_event *ev);
 extern bool ttp_evt_pget (struct ttp_fsm_event **evp);
 extern bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced);
 extern bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq);
+extern bool ttp_noc_mark_retransmit_sack (struct ttp_link_tag *lt, u32 seq,
+                                          u32 sack_base, u64 sack_bitmap);
 extern bool ttp_noc_mark_retransmit_one (struct ttp_link_tag *lt, u32 seq);
 extern void ttp_noc_start_full_backoff (struct ttp_link_tag *lt, struct ttp_fsm_event *qev);
 extern void ttp_noc_mark_timeout (struct ttp_link_tag *lt);
 extern void ttp_tag_note_peer_epoch (struct ttp_link_tag *lt, u16 epoch);
+extern bool ttp_rx_ooo_store (struct ttp_link_tag *lt, u32 seq,
+                              const struct sk_buff *skb, u16 noc_len);
+extern bool ttp_rx_ooo_take (struct ttp_link_tag *lt, u32 seq,
+                             struct sk_buff **skb, u16 *noc_len);
+extern u64  ttp_rx_ooo_bitmap (struct ttp_link_tag *lt, u32 base);
+extern void ttp_rx_ooo_flush (struct ttp_link_tag *lt);
 
 #endif

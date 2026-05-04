@@ -112,11 +112,37 @@ static bool ttp_ext_type_is_supported (u8 ext)
      * Keep the software extension framework explicit. The spec reserves several
      * extension ranges, but this implementation currently supports only:
      *   - BASE(0x00): no extension header, legacy/small payload path.
+     *   - SEL_ACK(0x20): selective ACK bitmap carried by TTP_NACK.
      *   - PAYLOAD_OFFSET(0xe0): AF_TTP socket fragmentation metadata.
      * Everything else is intentionally unsupported and is dropped by the header
      * validator before entering the FSM.
      */
-    return ext == TTP_ET__BASE || ext == TTP_ET__PAYLOAD_OFFSET;
+    return ext == TTP_ET__BASE || ext == TTP_ET__SEL_ACK ||
+           ext == TTP_ET__PAYLOAD_OFFSET;
+}
+
+static bool ttp_sack_ext_valid (struct ttp_frame_hdr *frh,
+                                struct ttp_pkt_info *pif)
+{
+    const struct ttp_ttpoe_noc_hdr *nh;
+
+    if (!frh || !frh->noc || !pif) {
+        return false;
+    }
+    if (pif->noc_len != sizeof (*nh)) {
+        TTP_DBG ("%s: invalid SACK extension length:%u\n",
+                 __FUNCTION__, pif->noc_len);
+        return false;
+    }
+
+    nh = frh->noc;
+    if (nh->xhdr1_fmt.type != TTP_ET__SEL_ACK) {
+        TTP_DBG ("%s: noc extension type:0x%02x expected:0x%02x\n",
+                 __FUNCTION__, nh->xhdr1_fmt.type, TTP_ET__SEL_ACK);
+        return false;
+    }
+
+    return true;
 }
 
 static bool ttp_payload_offset_ext_valid (struct ttp_frame_hdr *frh,
@@ -261,6 +287,16 @@ static bool ttp_header_validate (struct ttp_frame_hdr *frh,
             return false;
         }
         if (!ttp_payload_offset_ext_valid (frh, pif)) {
+            return false;
+        }
+    }
+    if (ext == TTP_ET__SEL_ACK) {
+        if (op != TTP_OP__TTP_NACK) {
+            TTP_DBG ("%s: SACK extension on opcode:%s\n", __FUNCTION__,
+                     TTP_OPCODE_NAME (op));
+            return false;
+        }
+        if (!ttp_sack_ext_valid (frh, pif)) {
             return false;
         }
     }
@@ -557,6 +593,15 @@ u16 ttp_skb_pars (const struct sk_buff *skb, struct ttp_frame_hdr *fh,
     pi->congn_reduced_echo = !!fh->ttp->conn_congn_reduced_echo;
     pi->rxi_seq = ntohl (fh->ttp->conn_rx_seq);
     pi->txi_seq = ntohl (fh->ttp->conn_tx_seq);
+    if (fh->ttp->conn_extension == TTP_ET__SEL_ACK &&
+        pi->noc_len >= sizeof (struct ttp_ttpoe_noc_hdr)) {
+        pi->sack_valid = true;
+        pi->sack_base = ((u32)fh->noc->xhdr1_fmt.extn_hdr1[0] << 24) |
+                        ((u32)fh->noc->xhdr1_fmt.extn_hdr1[1] << 16) |
+                        ((u32)fh->noc->xhdr1_fmt.extn_hdr1[2] << 8) |
+                        (u32)fh->noc->xhdr1_fmt.extn_hdr1[3];
+        pi->sack_bitmap = be64_to_cpu (fh->noc->xhdr2_u64);
+    }
 
     return ntohs (skb->protocol);
 }
@@ -913,6 +958,9 @@ bool ttp_skb_prep (struct sk_buff **skbp, struct ttp_fsm_event *qev,
         if (!(nl = qev->psi.noc_len)) {
             return false;
         }
+    }
+    else if (TTP_OP__TTP_NACK == op && qev->psi.sack_valid) {
+        nl = sizeof (struct ttp_ttpoe_noc_hdr);
     }
     if (!(lt = ttp_rbtree_tag_get (qev->kid))) {
         qlt._rkid = qev->kid;   /* no tag: resolve mac_low via qev */

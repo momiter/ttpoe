@@ -616,6 +616,50 @@ static bool ttp_fsm_rs__CLOSE_XACK (struct ttp_fsm_event *ev)
     return true;
 }
 
+static int ttp_fsm_payload_deliver_skb (u64 kid, struct ttp_link_tag *lt,
+                                        struct sk_buff *skb, u16 *noc_len)
+{
+    int rv;
+    struct ttp_frame_hdr frh;
+    struct ttp_pkt_info pif = {0};
+
+    if (!skb || !noc_len) {
+        return -EINVAL;
+    }
+
+    ttp_skb_pars (skb, &frh, &pif);
+    *noc_len = pif.noc_len;
+
+    rv = ttpoe_socket_payload_rx (kid, (u8 *)frh.noc, pif.noc_len);
+    if (-ENOTCONN == rv && lt && !lt->sock_managed) {
+        rv = ttpoe_noc_debug_rx ((u8 *)frh.noc, pif.noc_len);
+    }
+
+    return rv;
+}
+
+static void ttp_fsm_sack_prepare (struct ttp_fsm_event *ev,
+                                  struct ttp_link_tag *lt, u32 first_missing)
+{
+    u32 sack_base;
+    u64 bitmap;
+
+    if (!ev || !lt || !first_missing) {
+        return;
+    }
+
+    sack_base = ttp_seq_next_u32 (first_missing);
+    bitmap = ttp_rx_ooo_bitmap (lt, sack_base);
+    if (!bitmap) {
+        return;
+    }
+
+    ev->psi.sack_valid = true;
+    ev->psi.sack_base = sack_base;
+    ev->psi.sack_bitmap = bitmap;
+    atomic_inc (&ttp_stats.tx_sack_nack);
+}
+
 
 TTP_NOINLINE
 static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
@@ -673,11 +717,11 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             atomic_inc (&ttp_stats.drp_ct);
         }
         else if (expected_seq == pif.txi_seq) {
-            rv = ttpoe_socket_payload_rx (ev->kid, (u8 *)frh.noc, pif.noc_len);
-            if (-ENOTCONN == rv && !lt->sock_managed) {
-                rv = ttpoe_noc_debug_rx ((u8 *)frh.noc, pif.noc_len);
-            }
-            else if (-EPROTO == rv || -EINVAL == rv) {
+            struct sk_buff *ooo_skb;
+            u16 ooo_noc_len;
+
+            rv = ttp_fsm_payload_deliver_skb (ev->kid, lt, ev->rsk, &pif.noc_len);
+            if (-EPROTO == rv || -EINVAL == rv) {
                 atomic_inc (&ttp_stats.drp_ct);
                 TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, TTP_OP__TTP_NACK);
                 op = TTP_OP__TTP_NACK;
@@ -709,6 +753,24 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             atomic_inc (&ttp_stats.pld_ct);
             atomic_inc (&ttp_stats.rx_payload_pkts);
             atomic64_add (pif.noc_len, &ttp_stats.rx_payload_bytes);
+
+            while (ttp_rx_ooo_take (lt, ttp_seq_next_u32 (lt->rx_seq_id),
+                                    &ooo_skb, &ooo_noc_len)) {
+                u32 cached_seq = ttp_seq_next_u32 (lt->rx_seq_id);
+
+                rv = ttp_fsm_payload_deliver_skb (ev->kid, lt, ooo_skb, &ooo_noc_len);
+                if (rv) {
+                    ttp_skb_drop (ooo_skb);
+                    break;
+                }
+                lt->rx_seq_id = cached_seq;
+                ack_seq = cached_seq;
+                atomic_inc (&ttp_stats.pld_ct);
+                atomic_inc (&ttp_stats.rx_payload_pkts);
+                atomic_inc (&ttp_stats.rx_sack_delivered);
+                atomic64_add (ooo_noc_len, &ttp_stats.rx_payload_bytes);
+                ttp_skb_drop (ooo_skb);
+            }
         }
         else if (pif.txi_seq && ttp_seq_before_u32 (pif.txi_seq, expected_seq)) {
             op = TTP_OP__TTP_ACK;
@@ -732,6 +794,9 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             else {
                 op = TTP_OP__TTP_NACK;
                 ack_seq = expected_seq;
+                if (ttp_rx_ooo_store (lt, pif.txi_seq, ev->rsk, pif.noc_len)) {
+                    ttp_fsm_sack_prepare (ev, lt, expected_seq);
+                }
             }
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, op);
@@ -762,6 +827,16 @@ send:
     ev->psi.rxi_seq = ack_seq ? ack_seq : lt->rx_seq_id;
     frh.ttp->conn_rx_seq = htonl (ev->psi.rxi_seq);
     frh.ttp->conn_tx_seq = ev->psi.txi_seq = 0; /* tx-id=0 for ACKs */
+    if (op == TTP_OP__TTP_NACK && ev->psi.sack_valid) {
+        memset (frh.noc, 0, sizeof (*frh.noc));
+        frh.ttp->conn_extension = TTP_ET__SEL_ACK;
+        frh.noc->xhdr1_fmt.type = TTP_ET__SEL_ACK;
+        frh.noc->xhdr1_fmt.extn_hdr1[0] = (u8)(ev->psi.sack_base >> 24);
+        frh.noc->xhdr1_fmt.extn_hdr1[1] = (u8)(ev->psi.sack_base >> 16);
+        frh.noc->xhdr1_fmt.extn_hdr1[2] = (u8)(ev->psi.sack_base >> 8);
+        frh.noc->xhdr1_fmt.extn_hdr1[3] = (u8)ev->psi.sack_base;
+        frh.noc->xhdr2_u64 = cpu_to_be64 (ev->psi.sack_bitmap);
+    }
 
     ttp_skb_xmit (skb);
     TTP_EVLOG (ev, TTP_LG__PKT_TX, op);
@@ -1146,7 +1221,15 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_NACK (struct ttp_fsm_event *qev)
         return false;
     }
 
-    marked = ttp_noc_mark_retransmit_from (lt, qev->psi.rxi_seq);
+    if (qev->psi.sack_valid) {
+        atomic_inc (&ttp_stats.rx_sack_nack);
+        marked = ttp_noc_mark_retransmit_sack (lt, qev->psi.rxi_seq,
+                                               qev->psi.sack_base,
+                                               qev->psi.sack_bitmap);
+    }
+    else {
+        marked = ttp_noc_mark_retransmit_from (lt, qev->psi.rxi_seq);
+    }
     if (marked) {
         if (timer_pending (&lt->tmr)) {
             mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT));

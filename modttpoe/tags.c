@@ -83,6 +83,9 @@ struct ttp_link_tag_global ttp_global_root_head;
 struct ttp_link_tag  ttp_link_tag_tbl_0[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM];
 struct ttp_link_tag  ttp_link_tag_tbl_1[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM];
 struct ttp_link_tag  ttp_link_tag_tbl_2[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM];
+static struct ttp_rx_ooo_entry ttp_rx_ooo_tbl_0[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM][TTP_RX_OOO_SIZE];
+static struct ttp_rx_ooo_entry ttp_rx_ooo_tbl_1[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM][TTP_RX_OOO_SIZE];
+static struct ttp_rx_ooo_entry ttp_rx_ooo_tbl_2[TTP_TAG_TBL_SIZE][TTP_TAG_TBL_BKTS_NUM][TTP_RX_OOO_SIZE];
 
 struct ttp_stats_all ttp_stats;
 static atomic_t ttp_epoch_next = ATOMIC_INIT (0);
@@ -110,7 +113,7 @@ static u16 ttp_epoch_alloc (void)
 
 void ttp_tag_note_peer_epoch (struct ttp_link_tag *lt, u16 epoch)
 {
-    if (!lt) {
+    if (!lt || !lt->rx_ooo) {
         return;
     }
 
@@ -320,6 +323,151 @@ void ttp_tag_maybe_cleanup_orphan (struct ttp_link_tag *lt)
     }
 }
 
+static void ttp_rx_ooo_flush_locked (struct ttp_link_tag *lt)
+{
+    int i;
+
+    if (!lt) {
+        return;
+    }
+
+    for (i = 0; i < TTP_RX_OOO_SIZE; i++) {
+        if (lt->rx_ooo[i].skb) {
+            ttp_skb_drop (lt->rx_ooo[i].skb);
+        }
+        lt->rx_ooo[i].skb = NULL;
+        lt->rx_ooo[i].valid = false;
+        lt->rx_ooo[i].seq = 0;
+        lt->rx_ooo[i].noc_len = 0;
+    }
+}
+
+void ttp_rx_ooo_flush (struct ttp_link_tag *lt)
+{
+    mutex_lock (&ttp_global_root_head.event_mutx);
+    ttp_rx_ooo_flush_locked (lt);
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+}
+
+bool ttp_rx_ooo_store (struct ttp_link_tag *lt, u32 seq,
+                       const struct sk_buff *skb, u16 noc_len)
+{
+    u32 expected;
+    u32 last;
+    u32 slot;
+    int i;
+    struct sk_buff *copy;
+    bool stored = false;
+
+    if (!lt || !lt->rx_ooo || !skb || !seq) {
+        return false;
+    }
+
+    copy = skb_copy (skb, GFP_ATOMIC);
+    if (!copy) {
+        atomic_inc (&ttp_stats.rx_sack_dropped);
+        return false;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+
+    expected = ttp_seq_next_u32 (lt->rx_seq_id);
+    last = expected + TTP_RX_OOO_SIZE;
+    if (!ttp_seq_after_u32 (seq, expected) || ttp_seq_after_u32 (seq, last)) {
+        goto out_unlock;
+    }
+
+    for (i = 0; i < TTP_RX_OOO_SIZE; i++) {
+        if (lt->rx_ooo[i].valid && lt->rx_ooo[i].seq == seq) {
+            stored = true;
+            goto out_unlock;
+        }
+    }
+
+    slot = seq & (TTP_RX_OOO_SIZE - 1);
+    if (lt->rx_ooo[slot].valid) {
+        atomic_inc (&ttp_stats.rx_sack_dropped);
+        goto out_unlock;
+    }
+
+    lt->rx_ooo[slot].valid = true;
+    lt->rx_ooo[slot].seq = seq;
+    lt->rx_ooo[slot].noc_len = noc_len;
+    lt->rx_ooo[slot].skb = copy;
+    copy = NULL;
+    stored = true;
+    atomic_inc (&ttp_stats.rx_sack_cached);
+
+out_unlock:
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+    if (copy) {
+        ttp_skb_drop (copy);
+    }
+    return stored;
+}
+
+bool ttp_rx_ooo_take (struct ttp_link_tag *lt, u32 seq,
+                      struct sk_buff **skb, u16 *noc_len)
+{
+    int i;
+    bool found = false;
+
+    if (!lt || !lt->rx_ooo || !skb || !noc_len) {
+        return false;
+    }
+
+    *skb = NULL;
+    *noc_len = 0;
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+
+    for (i = 0; i < TTP_RX_OOO_SIZE; i++) {
+        if (!lt->rx_ooo[i].valid || lt->rx_ooo[i].seq != seq) {
+            continue;
+        }
+        *skb = lt->rx_ooo[i].skb;
+        *noc_len = lt->rx_ooo[i].noc_len;
+        lt->rx_ooo[i].skb = NULL;
+        lt->rx_ooo[i].valid = false;
+        lt->rx_ooo[i].seq = 0;
+        lt->rx_ooo[i].noc_len = 0;
+        found = true;
+        break;
+    }
+
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+    return found;
+}
+
+u64 ttp_rx_ooo_bitmap (struct ttp_link_tag *lt, u32 base)
+{
+    int i;
+    u32 off;
+    u64 bitmap = 0;
+
+    if (!lt || !lt->rx_ooo || !base) {
+        return 0;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+
+    for (i = 0; i < TTP_RX_OOO_SIZE; i++) {
+        if (!lt->rx_ooo[i].valid) {
+            continue;
+        }
+        if (ttp_seq_before_u32 (lt->rx_ooo[i].seq, base)) {
+            continue;
+        }
+        off = lt->rx_ooo[i].seq - base;
+        if (off < 64) {
+            bitmap |= BIT_ULL (off);
+        }
+    }
+
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+    return bitmap;
+}
+
 static inline bool ttp_noc_evt_is_sent (const struct ttp_fsm_event *ev)
 {
     return !!(ev->tx_flags & TTP_NOC_TXF_SENT);
@@ -485,9 +633,19 @@ bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced)
         goto out_unlock;
     }
 
-    if ((ev = ttp_noc_find_seq_locked (lt, ack_seq)) && !ttp_noc_evt_is_acked (ev)) {
-        ev->tx_flags |= TTP_NOC_TXF_ACKED;
-        matched = true;
+    if (!ttp_noc_find_seq_locked (lt, ack_seq)) {
+        goto out_unlock;
+    }
+    matched = true;
+
+    list_for_each_entry (ev, &lt->ncq, elm) {
+        if (ttp_seq_after_u32 (ev->psi.txi_seq, ack_seq)) {
+            break;
+        }
+        if (ttp_noc_evt_is_sent (ev) && !ttp_noc_evt_is_acked (ev)) {
+            ev->tx_flags |= TTP_NOC_TXF_ACKED;
+            matched = true;
+        }
     }
 
     list_for_each_entry_safe (ev, tmp, &lt->ncq, elm) {
@@ -609,6 +767,60 @@ out_unlock:
     return marked;
 }
 
+bool ttp_noc_mark_retransmit_sack (struct ttp_link_tag *lt, u32 seq,
+                                   u32 sack_base, u64 sack_bitmap)
+{
+    bool marked = false;
+    struct ttp_fsm_event *ev;
+    u32 off;
+
+    if (!lt || !seq) {
+        return false;
+    }
+
+    mutex_lock (&ttp_global_root_head.event_mutx);
+
+    ttp_noc_refresh_window_locked (lt);
+    if (ttp_seq_before_u32 (seq, lt->base_seq)) {
+        atomic_inc (&ttp_stats.stale_nack_ignored);
+        goto out_unlock;
+    }
+    if (lt->nack_recovery_active &&
+        !ttp_seq_before_u32 (seq, lt->nack_recovery_seq)) {
+        atomic_inc (&ttp_stats.duplicate_nack_ignored);
+        goto out_unlock;
+    }
+
+    list_for_each_entry (ev, &lt->ncq, elm) {
+        if (ttp_seq_before_u32 (ev->psi.txi_seq, seq)) {
+            continue;
+        }
+        if (ttp_noc_evt_is_acked (ev) || !ttp_noc_evt_is_sent (ev)) {
+            continue;
+        }
+        if (sack_base && ttp_seq_geq_u32 (ev->psi.txi_seq, sack_base)) {
+            off = ev->psi.txi_seq - sack_base;
+            if (off < 64 && (sack_bitmap & BIT_ULL (off))) {
+                continue;
+            }
+        }
+        ev->tx_flags |= TTP_NOC_TXF_RETRANS;
+        if (!marked) {
+            lt->retransmit_from = ev->psi.txi_seq;
+        }
+        marked = true;
+    }
+
+    if (marked) {
+        lt->nack_recovery_seq = seq;
+        lt->nack_recovery_active = true;
+    }
+
+out_unlock:
+    mutex_unlock (&ttp_global_root_head.event_mutx);
+    return marked;
+}
+
 static unsigned int ttp_noc_full_backoff_ms (struct ttp_link_tag *lt)
 {
     unsigned int shift;
@@ -698,6 +910,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
         atomic_inc (&ttp_stats.dels[lt->bkt]);
         ttp_rbtree_tag_del (kid);
     }
+    ttp_rx_ooo_flush (lt);
 
     lt->valid       = 0;
     lt->state       = TTP_ST__CLOSED;
@@ -1870,18 +2083,21 @@ void __init ttp_fsm_init (void)
             timer_setup (&lt->tmr, &ttp_fsm_tag_timer_callback, 0);
             INIT_WORK (&lt->wkq, ttp_do_tag_work);
             INIT_LIST_HEAD (&lt->ncq);
+            lt->rx_ooo = ttp_rx_ooo_tbl_0[hv][bk];
             ttp_tag_reset (lt);
 
             lt = &ttp_link_tag_tbl_1[hv][bk];
             timer_setup (&lt->tmr, &ttp_fsm_tag_timer_callback, 0);
             INIT_WORK (&lt->wkq, ttp_do_tag_work);
             INIT_LIST_HEAD (&lt->ncq);
+            lt->rx_ooo = ttp_rx_ooo_tbl_1[hv][bk];
             ttp_tag_reset (lt);
 
             lt = &ttp_link_tag_tbl_2[hv][bk];
             timer_setup (&lt->tmr, &ttp_fsm_tag_timer_callback, 0);
             INIT_WORK (&lt->wkq, ttp_do_tag_work);
             INIT_LIST_HEAD (&lt->ncq);
+            lt->rx_ooo = ttp_rx_ooo_tbl_2[hv][bk];
             ttp_tag_reset (lt);
         }
     }
