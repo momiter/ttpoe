@@ -350,22 +350,15 @@ void ttp_rx_ooo_flush (struct ttp_link_tag *lt)
 }
 
 bool ttp_rx_ooo_store (struct ttp_link_tag *lt, u32 seq,
-                       const struct sk_buff *skb, u16 noc_len)
+                       struct sk_buff *skb, u16 noc_len)
 {
     u32 expected;
     u32 last;
     u32 slot;
-    int i;
     struct sk_buff *copy;
     bool stored = false;
 
     if (!lt || !lt->rx_ooo || !skb || !seq) {
-        return false;
-    }
-
-    copy = skb_copy (skb, GFP_ATOMIC);
-    if (!copy) {
-        atomic_inc (&ttp_stats.rx_sack_dropped);
         return false;
     }
 
@@ -377,15 +370,18 @@ bool ttp_rx_ooo_store (struct ttp_link_tag *lt, u32 seq,
         goto out_unlock;
     }
 
-    for (i = 0; i < TTP_RX_OOO_SIZE; i++) {
-        if (lt->rx_ooo[i].valid && lt->rx_ooo[i].seq == seq) {
-            stored = true;
-            goto out_unlock;
-        }
+    slot = seq & (TTP_RX_OOO_SIZE - 1);
+    if (lt->rx_ooo[slot].valid && lt->rx_ooo[slot].seq == seq) {
+        stored = true;
+        goto out_unlock;
+    }
+    if (lt->rx_ooo[slot].valid) {
+        atomic_inc (&ttp_stats.rx_sack_dropped);
+        goto out_unlock;
     }
 
-    slot = seq & (TTP_RX_OOO_SIZE - 1);
-    if (lt->rx_ooo[slot].valid) {
+    copy = skb_clone (skb, GFP_ATOMIC);
+    if (!copy) {
         atomic_inc (&ttp_stats.rx_sack_dropped);
         goto out_unlock;
     }
@@ -394,22 +390,18 @@ bool ttp_rx_ooo_store (struct ttp_link_tag *lt, u32 seq,
     lt->rx_ooo[slot].seq = seq;
     lt->rx_ooo[slot].noc_len = noc_len;
     lt->rx_ooo[slot].skb = copy;
-    copy = NULL;
     stored = true;
     atomic_inc (&ttp_stats.rx_sack_cached);
 
 out_unlock:
     mutex_unlock (&ttp_global_root_head.event_mutx);
-    if (copy) {
-        ttp_skb_drop (copy);
-    }
     return stored;
 }
 
 bool ttp_rx_ooo_take (struct ttp_link_tag *lt, u32 seq,
                       struct sk_buff **skb, u16 *noc_len)
 {
-    int i;
+    u32 slot;
     bool found = false;
 
     if (!lt || !lt->rx_ooo || !skb || !noc_len) {
@@ -421,18 +413,15 @@ bool ttp_rx_ooo_take (struct ttp_link_tag *lt, u32 seq,
 
     mutex_lock (&ttp_global_root_head.event_mutx);
 
-    for (i = 0; i < TTP_RX_OOO_SIZE; i++) {
-        if (!lt->rx_ooo[i].valid || lt->rx_ooo[i].seq != seq) {
-            continue;
-        }
-        *skb = lt->rx_ooo[i].skb;
-        *noc_len = lt->rx_ooo[i].noc_len;
-        lt->rx_ooo[i].skb = NULL;
-        lt->rx_ooo[i].valid = false;
-        lt->rx_ooo[i].seq = 0;
-        lt->rx_ooo[i].noc_len = 0;
+    slot = seq & (TTP_RX_OOO_SIZE - 1);
+    if (lt->rx_ooo[slot].valid && lt->rx_ooo[slot].seq == seq) {
+        *skb = lt->rx_ooo[slot].skb;
+        *noc_len = lt->rx_ooo[slot].noc_len;
+        lt->rx_ooo[slot].skb = NULL;
+        lt->rx_ooo[slot].valid = false;
+        lt->rx_ooo[slot].seq = 0;
+        lt->rx_ooo[slot].noc_len = 0;
         found = true;
-        break;
     }
 
     mutex_unlock (&ttp_global_root_head.event_mutx);
@@ -523,6 +512,46 @@ static struct ttp_fsm_event *ttp_noc_find_seq_locked (struct ttp_link_tag *lt, u
     return NULL;
 }
 
+static bool ttp_noc_duplicate_nack_allows_retry_locked (struct ttp_link_tag *lt, u32 seq)
+{
+    struct ttp_fsm_event *ev;
+
+    if (!lt->nack_recovery_active) {
+        return true;
+    }
+
+    if (ttp_seq_before_u32 (seq, lt->nack_recovery_seq)) {
+        lt->nack_dup_count = 0;
+        return true;
+    }
+
+    if (ttp_seq_after_u32 (seq, lt->nack_recovery_seq)) {
+        atomic_inc (&ttp_stats.duplicate_nack_ignored);
+        return false;
+    }
+
+    ev = ttp_noc_find_seq_locked (lt, seq);
+    if (ev && ttp_noc_evt_is_retrans (ev)) {
+        atomic_inc (&ttp_stats.duplicate_nack_ignored);
+        return false;
+    }
+
+    lt->nack_dup_count++;
+    if (lt->nack_dup_count < TTP_DUP_NACK_FAST_RETRY) {
+        atomic_inc (&ttp_stats.duplicate_nack_ignored);
+        return false;
+    }
+
+    /*
+     * The first recovery attempt may itself be lost.  After a small duplicate
+     * NACK threshold, allow one more fast retransmit instead of waiting for the
+     * much slower payload timeout.
+     */
+    lt->nack_dup_count = 0;
+    lt->nack_recovery_active = false;
+    return true;
+}
+
 static struct ttp_fsm_event *ttp_noc_first_unacked_locked (struct ttp_link_tag *lt)
 {
     struct ttp_fsm_event *ev;
@@ -590,6 +619,7 @@ static void ttp_noc_refresh_window_locked (struct ttp_link_tag *lt)
         lt->retransmit_from = 0;
         lt->nack_recovery_seq = 0;
         lt->nack_recovery_active = false;
+        lt->nack_dup_count = 0;
         return;
     }
 
@@ -600,6 +630,7 @@ static void ttp_noc_refresh_window_locked (struct ttp_link_tag *lt)
         ttp_seq_before_u32 (lt->nack_recovery_seq, lt->base_seq)) {
         lt->nack_recovery_seq = 0;
         lt->nack_recovery_active = false;
+        lt->nack_dup_count = 0;
     }
 
     if (lt->retransmit_from && ttp_seq_before_u32 (lt->retransmit_from, lt->base_seq)) {
@@ -737,9 +768,7 @@ bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
         atomic_inc (&ttp_stats.stale_nack_ignored);
         goto out_unlock;
     }
-    if (lt->nack_recovery_active &&
-        !ttp_seq_before_u32 (seq, lt->nack_recovery_seq)) {
-        atomic_inc (&ttp_stats.duplicate_nack_ignored);
+    if (!ttp_noc_duplicate_nack_allows_retry_locked (lt, seq)) {
         goto out_unlock;
     }
 
@@ -760,6 +789,7 @@ bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
     if (marked) {
         lt->nack_recovery_seq = seq;
         lt->nack_recovery_active = true;
+        lt->nack_dup_count = 0;
     }
 
 out_unlock:
@@ -785,9 +815,7 @@ bool ttp_noc_mark_retransmit_sack (struct ttp_link_tag *lt, u32 seq,
         atomic_inc (&ttp_stats.stale_nack_ignored);
         goto out_unlock;
     }
-    if (lt->nack_recovery_active &&
-        !ttp_seq_before_u32 (seq, lt->nack_recovery_seq)) {
-        atomic_inc (&ttp_stats.duplicate_nack_ignored);
+    if (!ttp_noc_duplicate_nack_allows_retry_locked (lt, seq)) {
         goto out_unlock;
     }
 
@@ -814,6 +842,7 @@ bool ttp_noc_mark_retransmit_sack (struct ttp_link_tag *lt, u32 seq,
     if (marked) {
         lt->nack_recovery_seq = seq;
         lt->nack_recovery_active = true;
+        lt->nack_dup_count = 0;
     }
 
 out_unlock:
@@ -929,6 +958,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->next_seq    = 0;
     lt->retransmit_from = 0;
     lt->nack_recovery_seq = 0;
+    lt->nack_dup_count = 0;
     lt->close_tx_id = 0;
     lt->close_rx_id = 0;
     lt->close_nack_rx_id = 0;
@@ -975,7 +1005,14 @@ void ttp_tag_force_reset(struct ttp_link_tag *lt)
     }
 
     del_timer_sync(&lt->tmr);
-    cancel_work_sync(&lt->wkq);
+    /*
+     * This reset path is also used from socket connect failure/timeout paths.
+     * Do not synchronously wait for the tag work item here: repeated perf-test
+     * setup/teardown can otherwise leave the caller stuck in cancel_work_sync().
+     * Link tags are static table entries, so a late worker can safely observe
+     * the reset CLOSED state instead of dereferencing freed memory.
+     */
+    cancel_work(&lt->wkq);
 
     dropped = lt->tct;
     while (ttp_noc_dequ(lt)) {

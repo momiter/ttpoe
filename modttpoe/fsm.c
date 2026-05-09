@@ -638,6 +638,19 @@ static int ttp_fsm_payload_deliver_skb (u64 kid, struct ttp_link_tag *lt,
     return rv;
 }
 
+static int ttp_fsm_payload_deliver_noc (u64 kid, struct ttp_link_tag *lt,
+                                        const u8 *noc, u16 noc_len)
+{
+    int rv;
+
+    rv = ttpoe_socket_payload_rx (kid, noc, noc_len);
+    if (-ENOTCONN == rv && lt && !lt->sock_managed) {
+        rv = ttpoe_noc_debug_rx (noc, noc_len);
+    }
+
+    return rv;
+}
+
 static void ttp_fsm_sack_prepare (struct ttp_fsm_event *ev,
                                   struct ttp_link_tag *lt, u32 first_missing)
 {
@@ -720,7 +733,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             struct sk_buff *ooo_skb;
             u16 ooo_noc_len;
 
-            rv = ttp_fsm_payload_deliver_skb (ev->kid, lt, ev->rsk, &pif.noc_len);
+            rv = ttp_fsm_payload_deliver_noc (ev->kid, lt, (u8 *)frh.noc, pif.noc_len);
             if (-EPROTO == rv || -EINVAL == rv) {
                 atomic_inc (&ttp_stats.drp_ct);
                 TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_DROP, TTP_OP__TTP_NACK);
@@ -1196,7 +1209,7 @@ static bool ttp_fsm_ev_hdl__RXQ__TTP_ACK (struct ttp_fsm_event *qev)
                 TTP_EVLOG (qev, TTP_LG__LN_TIMER_START, TTP_OP__TTP_ACK);
             }
         }
-        else if (timer_pending (&lt->tmr)) {
+        else if (timer_pending (&lt->tmr) && lt->state != TTP_ST__CLOSE_SENT) {
             tv = del_timer (&lt->tmr);
             (void)tv;
             TTP_EVLOG (qev, TTP_LG__TIMER_DELETE, TTP_OP__TTP_ACK);

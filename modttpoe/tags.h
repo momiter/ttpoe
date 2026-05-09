@@ -191,6 +191,7 @@ extern struct ttp_link_tag_global ttp_global_root_head;
 #define TTP_TMX_FULL_MAX_MS  1000
 #define TTP_FULL_MAX_RETRY     16
 #define TTP_CLOSE_MAX_RETRY    16
+#define TTP_DUP_NACK_FAST_RETRY 3
 #define TTP_RX_OOO_SIZE        64
 
 struct ttp_rx_ooo_entry {
@@ -217,6 +218,7 @@ struct ttp_link_tag {
     u16                try;     /* tx-retry count */
     u16                full_retry; /* NACK_FULL probe retry count */
     u16                close_retry; /* CLOSE replay retry count */
+    u16                nack_dup_count; /* duplicate NACKs for current recovery */
 
     u8  valid;                  /* tag valid */
     u8  state;                  /* 3b state[2:0] in HW; in SW use enum ttp_states_enum */
@@ -441,7 +443,7 @@ extern void ttp_noc_start_full_backoff (struct ttp_link_tag *lt, struct ttp_fsm_
 extern void ttp_noc_mark_timeout (struct ttp_link_tag *lt);
 extern void ttp_tag_note_peer_epoch (struct ttp_link_tag *lt, u16 epoch);
 extern bool ttp_rx_ooo_store (struct ttp_link_tag *lt, u32 seq,
-                              const struct sk_buff *skb, u16 noc_len);
+                              struct sk_buff *skb, u16 noc_len);
 extern bool ttp_rx_ooo_take (struct ttp_link_tag *lt, u32 seq,
                              struct sk_buff **skb, u16 *noc_len);
 extern u64  ttp_rx_ooo_bitmap (struct ttp_link_tag *lt, u32 base);
