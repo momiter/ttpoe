@@ -980,7 +980,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->last_used = 0;
 
     lt->tex = false;    /* timer expired */
-    lt->twz = (u16)clamp_t (int, ttp_tx_window, 1, 64);
+    lt->twz = (u16)clamp_t (int, ttp_tx_window, 1, 256);
     lt->tct = 0;        /* tx-queue count */
     lt->txt = 0;        /* tx-scheduled count */
     lt->try = 0;        /* tx-retry count */
@@ -1505,6 +1505,7 @@ void ttp_evt_pput (struct ttp_fsm_event *ev)
 }
 
 #define TTP_NUM_CHANNELS  4
+#define TTP_WORK_DRAIN_BUDGET 64
 
 TTP_NOINLINE
 static int ttp_evt_getrr_locked (struct ttp_fsm_event **evp)
@@ -1869,7 +1870,8 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
 TTP_NOINLINE
 static void ttp_do_global_work (struct work_struct *wk)
 {
-    int rv = 0;
+    int budget = TTP_WORK_DRAIN_BUDGET;
+    int rv;
 
     if (0 == ttp_stats.wkq_sz) {
         ; /* fall thro' */
@@ -1879,17 +1881,22 @@ static void ttp_do_global_work (struct work_struct *wk)
     }
     else {
         ttp_stats.wkq_st--;
+        budget = 1;
     }
 
-    rv += ttp_evt_dequ ();
-    rv += ttp_skb_dequ ();
+    do {
+        rv = 0;
+        rv += ttp_evt_dequ ();
+        rv += ttp_skb_dequ ();
+    } while (rv && --budget);
 }
 
 
 TTP_NOINLINE
 static void ttp_do_tag_work (struct work_struct *wk)
 {
-    int rv = 0;
+    int budget = TTP_WORK_DRAIN_BUDGET;
+    int rv;
     bool do_tex = false;
     struct ttp_link_tag *lt;
     struct ttp_fsm_event *ev;
@@ -1902,6 +1909,7 @@ static void ttp_do_tag_work (struct work_struct *wk)
     }
     else {
         ttp_stats.wkq_st--;
+        budget = 1;
     }
 
     if (!(lt = from_work (lt, wk, wkq))) {
@@ -1932,7 +1940,9 @@ static void ttp_do_tag_work (struct work_struct *wk)
         }
     }
 
-    rv = ttp_evt_dequ ();
+    do {
+        rv = ttp_evt_dequ ();
+    } while (rv && --budget);
 }
 
 

@@ -980,7 +980,12 @@ bool ttp_skb_prep (struct sk_buff **skbp, struct ttp_fsm_event *qev,
             goto drop;
         }
     }
-    if (ttpoe_parse_check (skb)) {
+    if (ttp_verbose > 2) {
+        if (ttpoe_parse_check (skb)) {
+            goto drop;
+        }
+    }
+    else if (unlikely (skb->len < TTP_MIN_FRAME_LEN)) {
         goto drop;
     }
     BUG_ON (qev->tsk);
@@ -1075,7 +1080,12 @@ static int ttp_skb_recv (struct sk_buff *skb)
     }
 
 recv:
-    if (ttpoe_parse_check (skb)) {
+    if (ttp_verbose > 2) {
+        if (ttpoe_parse_check (skb)) {
+            goto drop;
+        }
+    }
+    else if (unlikely (skb->len < TTP_MIN_FRAME_LEN)) {
         goto drop;
     }
 

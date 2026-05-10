@@ -673,6 +673,66 @@ static void ttp_fsm_sack_prepare (struct ttp_fsm_event *ev,
     atomic_inc (&ttp_stats.tx_sack_nack);
 }
 
+static bool ttp_fsm_payload_is_socket_fragment (struct ttp_frame_hdr *frh,
+                                                const struct ttp_pkt_info *pif)
+{
+    if (!frh || !frh->ttp || !frh->noc || !pif) {
+        return false;
+    }
+    if (frh->ttp->conn_extension != TTP_ET__PAYLOAD_OFFSET ||
+        pif->noc_len < sizeof (*frh->noc)) {
+        return false;
+    }
+    return frh->noc->xhdr1_fmt.type == TTP_ET__PAYLOAD_OFFSET;
+}
+
+static bool ttp_fsm_payload_is_last_socket_fragment (struct ttp_frame_hdr *frh,
+                                                     const struct ttp_pkt_info *pif)
+{
+    if (!ttp_fsm_payload_is_socket_fragment (frh, pif)) {
+        return true;
+    }
+    return !!(frh->noc->xhdr1_fmt.extn_hdr1[0] & TTP_SOCK_FRAG_F_LAST);
+}
+
+static bool ttp_fsm_should_defer_fragment_ack (struct ttp_link_tag *lt,
+                                               struct ttp_frame_hdr *frh,
+                                               const struct ttp_pkt_info *pif,
+                                               bool delivered_ooo)
+{
+    u16 max_frags;
+    u16 frag_len;
+    u32 total_len;
+    u64 xhdr2;
+
+    if (!lt || delivered_ooo) {
+        return false;
+    }
+    if (!ttp_fsm_payload_is_socket_fragment (frh, pif) ||
+        ttp_fsm_payload_is_last_socket_fragment (frh, pif)) {
+        return false;
+    }
+
+    /*
+     * Only coalesce ACKs when the transmit window can hold a full maximum-size
+     * socket message. Smaller windows still need per-fragment ACKs to avoid
+     * stalling before the sender reaches the final fragment.
+     */
+    frag_len = ((u16)frh->noc->xhdr1_fmt.extn_hdr1[2] << 8) |
+               (u16)frh->noc->xhdr1_fmt.extn_hdr1[3];
+    if (!frag_len) {
+        return false;
+    }
+    xhdr2 = be64_to_cpu (frh->noc->xhdr2_u64);
+    total_len = (u32)(xhdr2 >> 32);
+    if (!total_len) {
+        return false;
+    }
+
+    max_frags = DIV_ROUND_UP (total_len, frag_len);
+    return lt->twz >= max_frags;
+}
+
 
 TTP_NOINLINE
 static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
@@ -684,6 +744,8 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
     struct ttp_pkt_info  pif = {0};
     enum ttp_opcodes_enum op = TTP_OP__TTP_ACK;
     u32 ack_seq = 0;
+    bool normal_inorder_ack = false;
+    bool delivered_ooo = false;
 
     ttp_skb_pars (ev->rsk, &frh, &pif);
 
@@ -759,6 +821,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
             op = TTP_OP__TTP_ACK;
             lt->rx_seq_id++;    /* update tag-rx-seq-id */
             ack_seq = pif.txi_seq;
+            normal_inorder_ack = true;
 
             TTP_EVLOG (ev, TTP_LG__NOC_PAYLOAD_RX, op);
             TTP_DB1 ("`-> %s: ACK payload seq-id:%d (exp:%d+1)\n",
@@ -778,6 +841,7 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
                 }
                 lt->rx_seq_id = cached_seq;
                 ack_seq = cached_seq;
+                delivered_ooo = true;
                 atomic_inc (&ttp_stats.pld_ct);
                 atomic_inc (&ttp_stats.rx_payload_pkts);
                 atomic_inc (&ttp_stats.rx_sack_delivered);
@@ -830,6 +894,11 @@ static bool ttp_fsm_rs__ACK (struct ttp_fsm_event *ev)
     }
 
 send:
+    if (op == TTP_OP__TTP_ACK && normal_inorder_ack &&
+        ttp_fsm_should_defer_fragment_ack (lt, &frh, &pif, delivered_ooo)) {
+        return true;
+    }
+
     if (!ttp_skb_prep (&skb, ev, op)) {
         TTP_EVLOG (ev, TTP_LG__PKT_DROP, op);
         return false;
