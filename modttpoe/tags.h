@@ -192,11 +192,12 @@ extern struct ttp_link_tag_global ttp_global_root_head;
 #define TTP_FULL_MAX_RETRY     16
 #define TTP_CLOSE_MAX_RETRY    16
 #define TTP_DUP_NACK_FAST_RETRY 3
+#define TTP_DUP_NACK_RETRY_MS  10
 #define TTP_CWND_LOSS_TARGET   64
 #define TTP_CWND_GROW_STEP     16
 #define TTP_CWND_LOSS_GROW_STEP 1
 #define TTP_CWND_LOSS_GROW_DIV  8
-#define TTP_RX_OOO_SIZE        64
+#define TTP_RX_OOO_SIZE        512
 
 struct ttp_rx_ooo_entry {
     bool valid;
@@ -226,6 +227,7 @@ struct ttp_link_tag {
     u16                full_retry; /* NACK_FULL probe retry count */
     u16                close_retry; /* CLOSE replay retry count */
     u16                nack_dup_count; /* duplicate NACKs for current recovery */
+    unsigned long      nack_recovery_jiffies;
 
     u8  valid;                  /* tag valid */
     u8  state;                  /* 3b state[2:0] in HW; in SW use enum ttp_states_enum */

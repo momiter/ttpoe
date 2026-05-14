@@ -536,6 +536,12 @@ static bool ttp_noc_duplicate_nack_allows_retry_locked (struct ttp_link_tag *lt,
         return false;
     }
 
+    if (time_before (jiffies, lt->nack_recovery_jiffies +
+                     msecs_to_jiffies (TTP_DUP_NACK_RETRY_MS))) {
+        atomic_inc (&ttp_stats.duplicate_nack_ignored);
+        return false;
+    }
+
     lt->nack_dup_count++;
     if (lt->nack_dup_count < TTP_DUP_NACK_FAST_RETRY) {
         atomic_inc (&ttp_stats.duplicate_nack_ignored);
@@ -671,6 +677,7 @@ static void ttp_noc_refresh_window_locked (struct ttp_link_tag *lt)
         lt->nack_recovery_seq = 0;
         lt->nack_recovery_active = false;
         lt->nack_dup_count = 0;
+        lt->nack_recovery_jiffies = 0;
         return;
     }
 
@@ -682,6 +689,7 @@ static void ttp_noc_refresh_window_locked (struct ttp_link_tag *lt)
         lt->nack_recovery_seq = 0;
         lt->nack_recovery_active = false;
         lt->nack_dup_count = 0;
+        lt->nack_recovery_jiffies = 0;
     }
 
     if (lt->retransmit_from && ttp_seq_before_u32 (lt->retransmit_from, lt->base_seq)) {
@@ -829,13 +837,8 @@ bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
         goto out_unlock;
     }
 
-    list_for_each_entry (ev, &lt->ncq, elm) {
-        if (ttp_seq_before_u32 (ev->psi.txi_seq, seq)) {
-            continue;
-        }
-        if (ttp_noc_evt_is_acked (ev) || !ttp_noc_evt_is_sent (ev)) {
-            continue;
-        }
+    ev = ttp_noc_find_seq_locked (lt, seq);
+    if (ev && !ttp_noc_evt_is_acked (ev) && ttp_noc_evt_is_sent (ev)) {
         ev->tx_flags |= TTP_NOC_TXF_RETRANS;
         marked = true;
     }
@@ -847,6 +850,7 @@ bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
         lt->nack_recovery_seq = seq;
         lt->nack_recovery_active = true;
         lt->nack_dup_count = 0;
+        lt->nack_recovery_jiffies = jiffies;
         ttp_noc_cwnd_loss_locked (lt);
     }
 
@@ -861,6 +865,8 @@ bool ttp_noc_mark_retransmit_sack (struct ttp_link_tag *lt, u32 seq,
     bool marked = false;
     struct ttp_fsm_event *ev;
     u32 off;
+    u32 sack_limit = 0;
+    int bit;
 
     if (!lt || !seq) {
         return false;
@@ -877,12 +883,30 @@ bool ttp_noc_mark_retransmit_sack (struct ttp_link_tag *lt, u32 seq,
         goto out_unlock;
     }
 
+    /*
+     * A SACK NACK says "seq is the first missing payload" and the bitmap only
+     * proves which later payloads have already arrived.  Do not fall back to
+     * Go-Back-N for payloads beyond the highest SACK bit; they may still be in
+     * flight and retransmitting them is the main source of amplification.
+     */
+    for (bit = 63; bit >= 0; bit--) {
+        if (sack_bitmap & BIT_ULL (bit)) {
+            sack_limit = sack_base + bit;
+            break;
+        }
+    }
+
     list_for_each_entry (ev, &lt->ncq, elm) {
         if (ttp_seq_before_u32 (ev->psi.txi_seq, seq)) {
             continue;
         }
         if (ttp_noc_evt_is_acked (ev) || !ttp_noc_evt_is_sent (ev)) {
             continue;
+        }
+        if (ev->psi.txi_seq != seq) {
+            if (!sack_limit || ttp_seq_after_u32 (ev->psi.txi_seq, sack_limit)) {
+                break;
+            }
         }
         if (sack_base && ttp_seq_geq_u32 (ev->psi.txi_seq, sack_base)) {
             off = ev->psi.txi_seq - sack_base;
@@ -901,6 +925,7 @@ bool ttp_noc_mark_retransmit_sack (struct ttp_link_tag *lt, u32 seq,
         lt->nack_recovery_seq = seq;
         lt->nack_recovery_active = true;
         lt->nack_dup_count = 0;
+        lt->nack_recovery_jiffies = jiffies;
         ttp_noc_cwnd_loss_locked (lt);
     }
 
@@ -971,6 +996,7 @@ void ttp_noc_mark_timeout (struct ttp_link_tag *lt)
         lt->nack_recovery_seq = lt->base_seq;
         lt->nack_recovery_active = true;
         lt->nack_dup_count = 0;
+        lt->nack_recovery_jiffies = jiffies;
         ttp_noc_cwnd_loss_locked (lt);
     }
     mutex_unlock (&ttp_global_root_head.event_mutx);
@@ -1022,6 +1048,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->retransmit_from = 0;
     lt->nack_recovery_seq = 0;
     lt->nack_dup_count = 0;
+    lt->nack_recovery_jiffies = 0;
     lt->close_tx_id = 0;
     lt->close_rx_id = 0;
     lt->close_nack_rx_id = 0;
