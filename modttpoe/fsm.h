@@ -278,5 +278,6 @@ extern enum ttp_events_enum ttp_opcodes_to_events_map[];
 #define TTP_OPCODE_IS_VALID(opc)   (((opc)>=TTP_OP__TTP_OPEN) && ((opc)<TTP_OP__invalid))
 
 extern void ttp_fsm_state_function (struct ttp_fsm_event *ev);
+extern bool ttp_fsm_tx_payload_direct (const struct ttp_fsm_event *qev);
 
 #endif

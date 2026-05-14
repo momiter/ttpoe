@@ -596,16 +596,67 @@ static struct ttp_fsm_event *ttp_noc_first_retrans_locked (struct ttp_link_tag *
 
 static u16 ttp_noc_inflight_locked (struct ttp_link_tag *lt)
 {
-    u16 cnt = 0;
-    struct ttp_fsm_event *ev;
+    return lt ? lt->inflight : 0;
+}
 
-    list_for_each_entry (ev, &lt->ncq, elm) {
-        if (ttp_noc_evt_is_sent (ev) && !ttp_noc_evt_is_acked (ev)) {
-            cnt++;
-        }
+static u16 ttp_noc_effective_window_locked (struct ttp_link_tag *lt)
+{
+    u16 cwnd;
+
+    if (!lt) {
+        return 1;
     }
 
-    return cnt;
+    cwnd = lt->cwnd ? lt->cwnd : lt->twz;
+    return clamp_t (u16, cwnd, 1, lt->twz);
+}
+
+static void ttp_noc_cwnd_loss_locked (struct ttp_link_tag *lt)
+{
+    u16 target;
+
+    if (!lt) {
+        return;
+    }
+
+    target = min_t (u16, lt->twz, TTP_CWND_LOSS_TARGET);
+    target = max_t (u16, target, 1);
+    if (!lt->cwnd || lt->cwnd > target) {
+        lt->cwnd = target;
+    }
+    lt->cwnd_acked = 0;
+    lt->cwnd_loss_seen = true;
+}
+
+static void ttp_noc_cwnd_ack_locked (struct ttp_link_tag *lt, u16 acked)
+{
+    u16 cwnd;
+    u16 step;
+    u32 threshold;
+
+    if (!lt || !acked || lt->cwnd >= lt->twz) {
+        return;
+    }
+
+    lt->cwnd_acked += acked;
+    cwnd = ttp_noc_effective_window_locked (lt);
+    if (lt->cwnd_loss_seen) {
+        step = TTP_CWND_LOSS_GROW_STEP;
+        threshold = (u32)cwnd * TTP_CWND_LOSS_GROW_DIV;
+    }
+    else {
+        step = TTP_CWND_GROW_STEP;
+        threshold = cwnd;
+    }
+    threshold = max_t (u32, threshold, 1);
+
+    while (lt->cwnd_acked >= threshold && lt->cwnd < lt->twz) {
+        lt->cwnd_acked -= threshold;
+        lt->cwnd = min_t (u16, lt->twz, lt->cwnd + step);
+        cwnd = ttp_noc_effective_window_locked (lt);
+        threshold = lt->cwnd_loss_seen ? (u32)cwnd * TTP_CWND_LOSS_GROW_DIV : cwnd;
+        threshold = max_t (u32, threshold, 1);
+    }
 }
 
 static void ttp_noc_refresh_window_locked (struct ttp_link_tag *lt)
@@ -647,6 +698,7 @@ bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced)
     bool matched = false;
     bool moved = false;
     u32 old_base = 0;
+    u16 retired_count = 0;
     struct ttp_fsm_event *ev, *tmp;
 
     if (advanced) {
@@ -688,8 +740,12 @@ bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced)
         list_add_tail (&ev->elm, &retired);
         lt->retire_id = ev->psi.txi_seq;
         lt->tct--;
+        if (lt->inflight && ttp_noc_evt_is_sent (ev)) {
+            lt->inflight--;
+        }
         ttp_stats.nocq--;
         moved = true;
+        retired_count++;
     }
 
     ttp_noc_refresh_window_locked (lt);
@@ -699,6 +755,7 @@ bool ttp_noc_ack_seq (struct ttp_link_tag *lt, u32 ack_seq, bool *advanced)
         lt->full_backoff_active = false;
         lt->full_retry = 0;
         lt->local_congestion = 0;
+        ttp_noc_cwnd_ack_locked (lt, retired_count);
     }
     if (ttp_noc_close_replay_ready_locked (lt)) {
         lt->close_blocked = false;
@@ -790,6 +847,7 @@ bool ttp_noc_mark_retransmit_from (struct ttp_link_tag *lt, u32 seq)
         lt->nack_recovery_seq = seq;
         lt->nack_recovery_active = true;
         lt->nack_dup_count = 0;
+        ttp_noc_cwnd_loss_locked (lt);
     }
 
 out_unlock:
@@ -843,6 +901,7 @@ bool ttp_noc_mark_retransmit_sack (struct ttp_link_tag *lt, u32 seq,
         lt->nack_recovery_seq = seq;
         lt->nack_recovery_active = true;
         lt->nack_dup_count = 0;
+        ttp_noc_cwnd_loss_locked (lt);
     }
 
 out_unlock:
@@ -909,6 +968,10 @@ void ttp_noc_mark_timeout (struct ttp_link_tag *lt)
         if (!lt->retransmit_from || ttp_seq_before_u32 (lt->base_seq, lt->retransmit_from)) {
             lt->retransmit_from = lt->base_seq;
         }
+        lt->nack_recovery_seq = lt->base_seq;
+        lt->nack_recovery_active = true;
+        lt->nack_dup_count = 0;
+        ttp_noc_cwnd_loss_locked (lt);
     }
     mutex_unlock (&ttp_global_root_head.event_mutx);
 }
@@ -970,6 +1033,7 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->rx_full_level = 0;
     lt->close_blocked = false;
     lt->nack_recovery_active = false;
+    lt->cwnd_loss_seen = false;
     lt->full_blocked = false;
     lt->rx_full_blocked = false;
     lt->congestion_echo_pending = false;
@@ -980,7 +1044,11 @@ void ttp_tag_reset (struct ttp_link_tag *lt)
     lt->last_used = 0;
 
     lt->tex = false;    /* timer expired */
-    lt->twz = (u16)clamp_t (int, ttp_tx_window, 1, 256);
+    lt->twz = (u16)clamp_t (int, ttp_tx_window, 1, 512);
+    lt->cwnd = min_t (u16, lt->twz, TTP_CWND_LOSS_TARGET);
+    lt->cwnd = max_t (u16, lt->cwnd, 1);
+    lt->cwnd_acked = 0;
+    lt->inflight = 0;
     lt->tct = 0;        /* tx-queue count */
     lt->txt = 0;        /* tx-scheduled count */
     lt->try = 0;        /* tx-retry count */
@@ -1457,7 +1525,6 @@ bool ttp_evt_pget (struct ttp_fsm_event **evp)
     return rv;
 }
 
-
 TTP_NOINLINE
 static void ttp_evt_pput_locked (struct ttp_fsm_event *ev)
 {
@@ -1754,9 +1821,10 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
 {
     static const int max_retry = 1000;
     struct ttp_fsm_event *ev, *tev;
-    bool scheduled = false;
+    bool queued = false;
     bool fatal = false;
     u16 inflight = 0;
+    u16 tx_limit;
 
     if (!lt) {
         return;
@@ -1794,10 +1862,6 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
                 fatal = true;
                 break;
             }
-            ev = ttp_evt_cpqu_locked (tev);
-            if (!ev) {
-                break;
-            }
             tev->tx_flags &= ~TTP_NOC_TXF_RETRANS;
             lt->txt++;
             atomic_inc (&ttp_stats.tx_retrans_pkts);
@@ -1805,7 +1869,20 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
             if (tev->psi.txi_seq == lt->base_seq) {
                 lt->try++;
             }
-            scheduled = true;
+            if (!ttp_fsm_tx_payload_direct (tev)) {
+                ev = ttp_evt_cpqu_locked (tev);
+                if (!ev) {
+                    lt->txt--;
+                    break;
+                }
+                queued = true;
+            }
+            else {
+                ev = tev;
+                if (lt->txt) {
+                    lt->txt--;
+                }
+            }
             TTP_DB1 ("%s: `-> re-enqueue#%d %s len:%d tx:%d mark:%s\n", __FUNCTION__,
                      lt->try, TTP_EVENT_NAME (tev->evt), ev->psi.noc_len, ev->psi.txi_seq,
                      TTP_EVENTS_FENCE_TO_STR (tev->mrk));
@@ -1816,8 +1893,9 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
             continue;
         }
 
+        tx_limit = ttp_noc_effective_window_locked (lt);
         inflight = ttp_noc_inflight_locked (lt);
-        if (inflight >= lt->twz) {
+        if (inflight >= tx_limit) {
             break;
         }
         if (lt->full_blocked) {
@@ -1829,13 +1907,27 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
             break;
         }
 
-        ev = ttp_evt_cpqu_locked (tev);
-        if (!ev) {
-            break;
-        }
         tev->tx_flags |= TTP_NOC_TXF_SENT;
+        lt->inflight++;
         lt->txt++;
-        scheduled = true;
+        if (!ttp_fsm_tx_payload_direct (tev)) {
+            ev = ttp_evt_cpqu_locked (tev);
+            if (!ev) {
+                tev->tx_flags &= ~TTP_NOC_TXF_SENT;
+                if (lt->inflight) {
+                    lt->inflight--;
+                }
+                lt->txt--;
+                break;
+            }
+            queued = true;
+        }
+        else {
+            ev = tev;
+            if (lt->txt) {
+                lt->txt--;
+            }
+        }
         TTP_DB1 ("%s: `-> enqueue %s len:%d tx:%d mark:%s\n", __FUNCTION__,
                  TTP_EVENT_NAME (tev->evt), ev->psi.noc_len, ev->psi.txi_seq,
                  TTP_EVENTS_FENCE_TO_STR (tev->mrk));
@@ -1859,7 +1951,7 @@ void ttp_noc_requ (struct ttp_link_tag *lt)
         return;
     }
 
-    if (scheduled) {
+    if (queued) {
         schedule_work (&lt->wkq);
     }
 

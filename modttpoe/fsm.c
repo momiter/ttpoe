@@ -928,6 +928,62 @@ send:
     return true;
 }
 
+bool ttp_fsm_tx_payload_direct (const struct ttp_fsm_event *qev)
+{
+    struct ttp_fsm_event ev = {0};
+    struct ttp_fsm_event *evp = &ev;
+    struct sk_buff *skb;
+    struct ttp_link_tag *lt;
+    struct ttp_frame_hdr frh;
+    enum ttp_opcodes_enum op = TTP_OP__TTP_PAYLOAD;
+
+    if (!qev || !qev->psi.noc_len) {
+        return false;
+    }
+    if (!(lt = ttp_rbtree_tag_get (qev->kid))) {
+        return false;
+    }
+
+    ev.evt = qev->evt;
+    ev.kid = qev->kid;
+    ev.idx = qev->idx;
+    ev.mrk = qev->mrk;
+    ttp_tsk_bind (&ev, qev);
+    if (!ev.tsk) {
+        return false;
+    }
+
+    if (!ttp_skb_prep (&skb, &ev, op)) {
+        if (ev.tsk) {
+            ttp_skb_drop (ev.tsk);
+            ev.tsk = NULL;
+        }
+        TTP_EVLOG (evp, TTP_LG__PKT_DROP, op);
+        return false;
+    }
+
+    ttp_skb_pars (skb, &frh, NULL);
+
+    frh.ttp->conn_rx_seq = ev.psi.rxi_seq = 0; /* rx=0 for PAYLOAD */
+    frh.ttp->conn_tx_seq = htonl (ev.psi.txi_seq);
+
+    ttp_skb_xmit (skb);
+    TTP_EVLOG (evp, TTP_LG__PKT_TX, op);
+
+    if (ev.psi.txi_seq == lt->base_seq) {
+        if (timer_pending (&lt->tmr)) {
+            mod_timer_pending (&lt->tmr, jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT));
+            TTP_EVLOG (evp, TTP_LG__LN_TIMER_RESTART, TTP_OP__invalid);
+        }
+        else {
+            lt->tmr.expires = jiffies + msecs_to_jiffies (TTP_TMX_PAYLOAD_SENT);
+            add_timer (&lt->tmr);
+            TTP_EVLOG (evp, TTP_LG__LN_TIMER_START, TTP_OP__invalid);
+        }
+    }
+
+    return true;
+}
 
 TTP_NOINLINE
 static bool ttp_fsm_rs__REPLAY_DATA (struct ttp_fsm_event *ev)

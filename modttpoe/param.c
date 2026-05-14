@@ -758,7 +758,7 @@ MODULE_PARM_DESC (tag_seq, "  starting value of tag seq number (default=1)");
 
 int ttp_tx_window = 48;
 module_param_named (tx_window, ttp_tx_window, int, 0444);
-MODULE_PARM_DESC (tx_window, "fixed transmit window size (default=48, range [1:256])");
+MODULE_PARM_DESC (tx_window, "fixed transmit window size (default=48, range [1:512])");
 
 module_param_named (evlog, ttp_evlog_enabled, int, 0644);
 MODULE_PARM_DESC (evlog, "enable FSM event log ring (default=1, set 0 for experiments)");

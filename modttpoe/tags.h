@@ -192,6 +192,10 @@ extern struct ttp_link_tag_global ttp_global_root_head;
 #define TTP_FULL_MAX_RETRY     16
 #define TTP_CLOSE_MAX_RETRY    16
 #define TTP_DUP_NACK_FAST_RETRY 3
+#define TTP_CWND_LOSS_TARGET   64
+#define TTP_CWND_GROW_STEP     16
+#define TTP_CWND_LOSS_GROW_STEP 1
+#define TTP_CWND_LOSS_GROW_DIV  8
 #define TTP_RX_OOO_SIZE        64
 
 struct ttp_rx_ooo_entry {
@@ -213,6 +217,9 @@ struct ttp_link_tag {
     bool               tex;     /* timer expired */
 
     u16                twz;     /* tx window size (defaults to 1 for now) */
+    u16                cwnd;    /* adaptive effective tx window */
+    u16                cwnd_acked; /* payload ACK credit for additive growth */
+    u16                inflight; /* sent but not cumulatively ACKed payloads */
     u16                tct;     /* tx-queue count */
     u16                txt;     /* tx-scheduled count */
     u16                try;     /* tx-retry count */
@@ -245,6 +252,7 @@ struct ttp_link_tag {
     u8  rx_full_level;
     bool close_blocked;
     bool nack_recovery_active;
+    bool cwnd_loss_seen;
     bool full_blocked;
     bool full_backoff_active;
     bool rx_full_blocked;
